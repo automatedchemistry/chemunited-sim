@@ -1,0 +1,33 @@
+"""Simulation configuration for the worker module."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..common.constant import ETA_WATER_25C
+
+
+@dataclass
+class SimConfig:
+    """Parameters that govern one simulation run.
+
+    Attributes
+    ----------
+    dt:
+        Simulation time step in seconds.
+    t_end:
+        Simulation end time in seconds.  The worker runs from t=0 to t=t_end
+        inclusive.
+    viscosity:
+        Dynamic viscosity of the carrier fluid in Pa·s.  Defaults to water
+        at 25 °C (8.9 × 10⁻⁴ Pa·s).
+    bpr_max_iters:
+        Maximum number of hydraulic solve iterations per step to stabilise
+        the active BPR edge set.  Convergence is typically reached in 2–3
+        iterations.  A :class:`UserWarning` is emitted if the limit is hit.
+    """
+
+    dt: float
+    t_end: float
+    viscosity: float = ETA_WATER_25C
+    bpr_max_iters: int = 20

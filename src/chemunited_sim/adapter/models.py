@@ -1,0 +1,114 @@
+"""Hydraulic graph data structures for chemunited-sim.
+
+These objects are produced by the adapter and consumed by the hydraulics
+solver, transport module, inventory module, and recorder. They carry no
+physics logic -- only structural and geometric information.
+
+All physical quantities are in SI units:
+    length            -- metres (m)
+    diameter          -- metres (m)
+    resistance_override -- Pa*s/m3
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from chemunited_core.components.enums import InternalEdgeRole
+from chemunited_core.components.internals import InventoryNode, PortBoundaryCondition
+
+
+@dataclass(frozen=True)
+class HydraulicNode:
+    """A single node in the flat hydraulic network graph.
+
+    Represents one of:
+    - A component port:         node_id = "component_name.port_number"
+    - A vessel inventory node:  node_id = "component_name.Inventory"
+    - A junction hub port:      node_id = "component_name.0",  is_hub=True
+
+    Nodes are immutable once compiled. Boundary conditions are copied verbatim
+    from Port.boundary at compile time and never mutated.
+
+    Attributes:
+        node_id:   Globally unique node identifier.
+        boundary:  Hydraulic boundary condition for terminal nodes (pumps,
+                   pressure controllers). None means the node is internal --
+                   both pressure and flow are solved by the network.
+        is_hub:    True only for the central hub port (port 0) of JunctionData.
+        component: Owning component name, used by the recorder.
+    """
+
+    node_id: str
+    boundary: PortBoundaryCondition | None
+    is_hub: bool
+    component: str
+
+
+@dataclass
+class HydraulicEdge:
+    """A single directed edge in the flat hydraulic network graph.
+
+    Represents an internal component channel (is_external=False) or an
+    external physical tube connecting two component ports (is_external=True).
+
+    The hydraulics solver reads role, length, diameter, and resistance_override:
+        role == JUNCTION            -> R = 0 (lossless, geometry ignored)
+        resistance_override is not None -> use override directly (Pa*s/m3)
+        otherwise                   -> R = (128 * eta * L) / (pi * D^4)
+
+    HydraulicEdge is mutable. The worker writes resistance_override in-place
+    for BPR edges each time step and for valve edges after rotor switches.
+
+    Attributes:
+        edge_id:             Globally unique identifier.
+                             Internal: "component_name.origin_port.dest_port"
+                             External: EdgeData.name
+        origin_node_id:      HydraulicNode.node_id of the source endpoint.
+        destination_node_id: HydraulicNode.node_id of the target endpoint.
+        length:              Channel length in metres (m). 0.0 for BPR edges.
+        diameter:            Channel inner diameter in metres (m). 0.0 for BPR.
+        role:                TRANSPORT = resistance from geometry.
+                             JUNCTION  = lossless, R = 0.
+        resistance_override: None = compute from geometry.
+                             float = use directly (Pa*s/m3).
+                             R_MAX_HYDRAULIC = effectively closed channel.
+        component:           Owning component name; None for external edges.
+        is_external:         True for edges derived from EdgeData (physical tubing).
+    """
+
+    edge_id: str
+    origin_node_id: str
+    destination_node_id: str
+    length: float
+    diameter: float
+    role: InternalEdgeRole
+    resistance_override: float | None
+    component: str | None
+    is_external: bool
+
+
+@dataclass
+class HydraulicGraph:
+    """Flat hydraulic network graph produced by compile_graph.
+
+    Contains all hydraulic nodes and edges for the entire platform.
+    The hydraulics solver, transport module, inventory module, and recorder
+    all consume this object -- they do not read chemunited-core objects directly.
+
+    Attributes:
+        nodes:           All hydraulic nodes keyed by node_id.
+        edges:           All hydraulic edges keyed by edge_id. Dict for O(1)
+                         lookup when the worker updates BPR or valve edges.
+        inventory_nodes: Snapshot-copied InventoryNode objects keyed by
+                         "component_name.Inventory". Deep-copied at compile
+                         time -- subsequent sync_internal_state() calls on
+                         the source component do not affect these copies.
+                         Used by the inventory module to seed InventoryState.
+        bpr_edges:       Edge IDs of all BPR-controlled edges. Pre-compiled
+                         index for the worker loop that toggles them each step.
+    """
+
+    nodes: dict[str, HydraulicNode] = field(default_factory=dict)
+    edges: dict[str, HydraulicEdge] = field(default_factory=dict)
+    inventory_nodes: dict[str, InventoryNode] = field(default_factory=dict)
+    bpr_edges: list[str] = field(default_factory=list)
