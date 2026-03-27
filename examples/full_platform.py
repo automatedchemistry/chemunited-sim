@@ -16,21 +16,9 @@ settles well above the 2 bar setpoint.  Gas exits the BPR and is directed by
 a two-position rotary valve to either a collection line or a waste line.
 The liquid phase stays inside the reactor (batch liquid, continuous gas).
 
-Network topology::
+Network topology:
 
-    [gassupply 3 bar]--gastube------------------------------+
-                                                            +--[tmixer 3-port]--reactortube--[reactor 10 mL]
-    [liquidpump 3 mL/min]--liquidtube-------------------+                      port1(TOP) |  port2(BOTTOM)
-                                                                                           |
-                                                                                  [bpr 2 bar]
-                                                                                         |
-                                                                                    outlettube  (D=1.5 mm)
-                                                                                         |
-                                                                               [divertvalve 2-pos]
-                                                                                /                \\
-                                                                          collecttube         wastetube
-                                                                              |                   |
-                                                                    [productsink 1 bar] [wastesink 1 bar]
+see full_platform_flow_diagram.svg
 
 Components used
 ---------------
