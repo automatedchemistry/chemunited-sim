@@ -18,21 +18,7 @@ back-pressure regulator (BPR, setpoint 2 bar) that holds the reactor above
 operating pressure.  Downstream of the BPR a two-position rotary valve directs
 flow to either a collection sink or a waste sink; it switches at t = 20 s.
 
-```
-[gassupply 3 bar] --gastube--------------------------+
-                                                      +-[tmixer]-reactortube-[reactor 10 mL]
-[liquidpump 3 mL/min] --liquidtube--------------+              port1(TOP) |  port2(BOTTOM)
-                                                                           |
-                                                                  [bpr 2 bar]
-                                                                          |
-                                                               outlettube (D=1.5 mm)
-                                                                          |
-                                                             [divertvalve 2-pos]
-                                                              /                \
-                                                        collecttube         wastetube
-                                                            |                   |
-                                                  [productsink 1 bar]  [wastesink 1 bar]
-```
+![flow_diagram](full_platform_flow_diagram.svg)
 
 ---
 
