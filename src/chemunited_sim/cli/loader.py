@@ -111,6 +111,10 @@ def load_project(path: Path) -> ProjectState:
     setup_module.build_draw(builder)
 
     graph = compile_graph(builder.hydraulic_components, builder.edges)
+
+    if hasattr(setup_module, "build_graph_patch"):
+        setup_module.build_graph_patch(graph)
+
     components = {c.name: c for c in builder.components}
 
     return ProjectState(

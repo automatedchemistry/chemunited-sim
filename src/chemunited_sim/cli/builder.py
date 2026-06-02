@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from chemunited_core.components import ComponentData, NeutralComponentData
+from chemunited_core.compounds import COMPOUNDS, ChemicalEntity
 from chemunited_core.connections.edge import EdgeData, EdgeMode
 from chemunited_core.common.enums import ConnectionType
 from chemunited_core.figure_registry import COMPONENTS
@@ -65,6 +66,31 @@ class PlatformBuilder:
         edge = EdgeData.from_mode(mode)
         self._edges.append(edge)
         return edge
+
+    def add_compound(
+        self,
+        name: str = "reagent_a",
+        molecular_weight: float = 120.0,
+        cp_liquid: float = 150.0,
+        density_liquid: float = 1050.0,
+    ):
+        if name in COMPOUNDS:
+            raise ValueError(f"Compound '{name}' already exists")
+        COMPOUNDS.register(
+            ChemicalEntity(
+                name=name,
+                molecular_weight=molecular_weight,
+                cp_liquid=cp_liquid,
+                density_liquid=density_liquid,
+            )
+        )
+
+    def add_component_data(self, data: ComponentData) -> ComponentData:
+        """Add a pre-created ComponentData directly, bypassing the figure registry."""
+        if data.name in self._components:
+            raise ValueError(f"Duplicate component name '{data.name}'")
+        self._components[data.name] = data
+        return data
 
     @property
     def hydraulic_components(self) -> list[ComponentData]:
