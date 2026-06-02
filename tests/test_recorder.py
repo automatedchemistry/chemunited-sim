@@ -16,7 +16,6 @@ import sqlite3
 from collections import deque
 
 import pytest
-
 from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components.enums import InternalEdgeRole
 
@@ -31,10 +30,10 @@ from chemunited_sim.recorder import (
 )
 from chemunited_sim.transport.models import Pocket, TransportState
 
-
 # ---------------------------------------------------------------------------
 # Helpers — minimal graph factory
 # ---------------------------------------------------------------------------
+
 
 def _make_node(node_id: str) -> HydraulicNode:
     return HydraulicNode(node_id=node_id, boundary=None, is_hub=False, component="comp")
@@ -76,6 +75,7 @@ def _simple_graph() -> HydraulicGraph:
 # 1. Import smoke test
 # ---------------------------------------------------------------------------
 
+
 def test_imports():
     assert CellDefinition is not None
     assert Recorder is not None
@@ -87,12 +87,15 @@ def test_imports():
 # 2. build_cell_definitions
 # ---------------------------------------------------------------------------
 
+
 class TestBuildCellDefinitions:
     def test_single_cell_when_edge_shorter_than_cell_length(self):
         graph = HydraulicGraph()
         graph.nodes["a"] = _make_node("a")
         graph.nodes["b"] = _make_node("b")
-        graph.edges["short"] = _make_edge("short", "a", "b", length=0.005, diameter=0.004)
+        graph.edges["short"] = _make_edge(
+            "short", "a", "b", length=0.005, diameter=0.004
+        )
 
         cells = build_cell_definitions(graph, cell_length_m=0.01)
 
@@ -122,7 +125,11 @@ class TestBuildCellDefinitions:
         graph.nodes["a"] = _make_node("a")
         graph.nodes["b"] = _make_node("b")
         graph.edges["junc"] = _make_edge(
-            "junc", "a", "b", length=1.0, diameter=0.004,
+            "junc",
+            "a",
+            "b",
+            length=1.0,
+            diameter=0.004,
             role=InternalEdgeRole.JUNCTION,
         )
 
@@ -143,7 +150,9 @@ class TestBuildCellDefinitions:
         for name in ("zz", "aa"):
             graph.nodes[f"{name}_0"] = _make_node(f"{name}_0")
             graph.nodes[f"{name}_1"] = _make_node(f"{name}_1")
-            graph.edges[name] = _make_edge(name, f"{name}_0", f"{name}_1", length=0.025, diameter=0.004)
+            graph.edges[name] = _make_edge(
+                name, f"{name}_0", f"{name}_1", length=0.025, diameter=0.004
+            )
 
         cells = build_cell_definitions(graph, cell_length_m=0.01)
         edge_ids = [c.edge_id for c in cells]
@@ -154,6 +163,7 @@ class TestBuildCellDefinitions:
 # ---------------------------------------------------------------------------
 # 3. Recorder.should_record
 # ---------------------------------------------------------------------------
+
 
 class TestShouldRecord:
     def _recorder(self, tmp_path, dt=0.1, record_interval=1.0):
@@ -206,6 +216,7 @@ class TestShouldRecord:
 # 4. Static tables written at construction
 # ---------------------------------------------------------------------------
 
+
 class TestStaticTables:
     def _open_ro(self, db_path):
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -224,7 +235,9 @@ class TestStaticTables:
         rec.close()
 
         conn = self._open_ro(tmp_path / "meta.db")
-        rows = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")}
+        rows = {
+            r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")
+        }
         conn.close()
 
         assert rows["dt"] == "0.1"
@@ -256,7 +269,11 @@ class TestStaticTables:
         graph.nodes["a"] = _make_node("a")
         graph.nodes["b"] = _make_node("b")
         graph.edges["junc"] = _make_edge(
-            "junc", "a", "b", length=1.0, diameter=0.004,
+            "junc",
+            "a",
+            "b",
+            length=1.0,
+            diameter=0.004,
             role=InternalEdgeRole.JUNCTION,
         )
 
@@ -279,7 +296,9 @@ class TestStaticTables:
         r2.close()
 
         conn = self._open_ro(db)
-        rows = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")}
+        rows = {
+            r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")
+        }
         conn.close()
         assert rows["platform_name"] == "second"
 
@@ -287,6 +306,7 @@ class TestStaticTables:
 # ---------------------------------------------------------------------------
 # 5. Recorder.record — dynamic tables
 # ---------------------------------------------------------------------------
+
 
 def _make_hyd_state():
     return HydraulicState(
@@ -330,7 +350,9 @@ def _make_transport_state(graph: HydraulicGraph) -> TransportState:
 class TestRecord:
     def _setup(self, tmp_path):
         graph = _simple_graph()
-        rec = Recorder(db_path=tmp_path / "rec.db", graph=graph, dt=0.1, record_interval=1.0)
+        rec = Recorder(
+            db_path=tmp_path / "rec.db", graph=graph, dt=0.1, record_interval=1.0
+        )
         return rec, graph, tmp_path / "rec.db"
 
     def _open_ro(self, db_path):
@@ -416,9 +438,9 @@ class TestRecord:
         rec.close()
 
         conn = self._open_ro(db_path)
-        rows = list(conn.execute(
-            "SELECT * FROM inventory_content WHERE phase='liquid'"
-        ))
+        rows = list(
+            conn.execute("SELECT * FROM inventory_content WHERE phase='liquid'")
+        )
         conn.close()
 
         assert len(rows) == 1
@@ -435,9 +457,7 @@ class TestRecord:
         rec.close()
 
         conn = self._open_ro(db_path)
-        rows = list(conn.execute(
-            "SELECT * FROM inventory_content WHERE phase='gas'"
-        ))
+        rows = list(conn.execute("SELECT * FROM inventory_content WHERE phase='gas'"))
         conn.close()
 
         assert len(rows) == 1
@@ -479,7 +499,9 @@ class TestRecord:
 
     def test_cell_content_written_when_species_present(self, tmp_path):
         graph = _simple_graph()
-        rec = Recorder(db_path=tmp_path / "sp.db", graph=graph, dt=0.1, record_interval=1.0)
+        rec = Recorder(
+            db_path=tmp_path / "sp.db", graph=graph, dt=0.1, record_interval=1.0
+        )
 
         hyd = _make_hyd_state()
         area = math.pi * (0.004 / 2.0) ** 2
@@ -515,7 +537,12 @@ class TestRecord:
         rec.close()
 
         conn = self._open_ro(db_path)
-        times = [r[0] for r in conn.execute("SELECT DISTINCT time FROM node_pressure ORDER BY time")]
+        times = [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT time FROM node_pressure ORDER BY time"
+            )
+        ]
         conn.close()
 
         assert times == pytest.approx([0.0, 1.0, 2.0])
@@ -528,8 +555,12 @@ class TestRecord:
         # Edge length = cell_length_m exactly → 1 cell
         graph.edges["e1"] = _make_edge("e1", "a", "b", length=0.01, diameter=0.004)
 
-        rec = Recorder(db_path=tmp_path / "frac.db", graph=graph, dt=0.1, record_interval=1.0)
-        hyd = HydraulicState(pressures={"a": 200_000.0, "b": 101_325.0}, flows={"e1": 1e-6})
+        rec = Recorder(
+            db_path=tmp_path / "frac.db", graph=graph, dt=0.1, record_interval=1.0
+        )
+        hyd = HydraulicState(
+            pressures={"a": 200_000.0, "b": 101_325.0}, flows={"e1": 1e-6}
+        )
         area = math.pi * (0.004 / 2.0) ** 2
         pocket = Pocket(
             phase_kind=PhaseKind.GAS,
@@ -556,6 +587,7 @@ class TestRecord:
 # ---------------------------------------------------------------------------
 # 6. Recorder.close — idempotent
 # ---------------------------------------------------------------------------
+
 
 class TestClose:
     def test_close_is_idempotent(self, tmp_path):

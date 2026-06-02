@@ -19,9 +19,8 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 
-from chemunited_core.components import ComponentData
-
 from chemunited_core.common.constant import R_MAX_HYDRAULIC
+from chemunited_core.components import ComponentData
 
 from ..adapter.models import HydraulicEdge, HydraulicGraph
 from ..hydraulics.models import HydraulicState
@@ -38,10 +37,10 @@ from ..transport.initialiser import build_initial_state
 from ..transport.models import TransportState
 from .config import SimConfig
 
-
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _BprEntry:
@@ -86,6 +85,7 @@ def _build_bpr_entries(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 class Worker:
     """Operator-splitting simulation loop for one platform configuration.
@@ -216,6 +216,11 @@ class Worker:
 
         Closes the recorder after the last step if one was provided.
         """
+        if self._config.t_end is None:
+            raise ValueError(
+                "Worker.run() requires t_end to be set. "
+                "For open-ended runs, drive the loop with step() directly."
+            )
         dt = self._config.dt
         n_end = round(self._config.t_end / dt)
         while round(self._t / dt) <= n_end:

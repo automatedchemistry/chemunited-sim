@@ -27,7 +27,8 @@ class SimConfig:
         iterations.  A :class:`UserWarning` is emitted if the limit is hit.
     """
 
-    dt: float
-    t_end: float
+    dt: float = 0.1
+    t_end: float | None = None
+    real_time: bool = False
     viscosity: float = ETA_WATER_25C
     bpr_max_iters: int = 20

@@ -51,6 +51,7 @@ patch, pockets would be silently discarded at the valve centre node.
 
 All quantities are in SI units (Pa, m3, m, s, mol, K).
 """
+
 from __future__ import annotations
 
 import pathlib
@@ -85,35 +86,42 @@ from chemunited_sim.reactions import FirstOrderDecay
 from chemunited_sim.recorder import Recorder
 from chemunited_sim.worker import SimConfig, Worker
 
-
 # ---------------------------------------------------------------------------
 # Section 1 — Chemical compound registry
 # ---------------------------------------------------------------------------
 COMPOUNDS.clear()  # remove any leftovers from a previous run in this interpreter
 
-COMPOUNDS.register(ChemicalEntity(
-    name="reagent_a",
-    molecular_weight=120.0,   # g/mol
-    cp_liquid=150.0,           # J/(mol*K)
-    density_liquid=1050.0,     # kg/m3
-))
-COMPOUNDS.register(ChemicalEntity(
-    name="product_b",
-    molecular_weight=120.0,
-    cp_liquid=150.0,
-    density_liquid=1020.0,
-))
-COMPOUNDS.register(ChemicalEntity(
-    name="solvent",
-    molecular_weight=78.0,
-    cp_liquid=130.0,
-    density_liquid=880.0,
-))
-COMPOUNDS.register(ChemicalEntity(
-    name="nitrogen",
-    molecular_weight=28.0,
-    cp_gas=29.0,
-))
+COMPOUNDS.register(
+    ChemicalEntity(
+        name="reagent_a",
+        molecular_weight=120.0,  # g/mol
+        cp_liquid=150.0,  # J/(mol*K)
+        density_liquid=1050.0,  # kg/m3
+    )
+)
+COMPOUNDS.register(
+    ChemicalEntity(
+        name="product_b",
+        molecular_weight=120.0,
+        cp_liquid=150.0,
+        density_liquid=1020.0,
+    )
+)
+COMPOUNDS.register(
+    ChemicalEntity(
+        name="solvent",
+        molecular_weight=78.0,
+        cp_liquid=130.0,
+        density_liquid=880.0,
+    )
+)
+COMPOUNDS.register(
+    ChemicalEntity(
+        name="nitrogen",
+        molecular_weight=28.0,
+        cp_gas=29.0,
+    )
+)
 
 print("=== chemunited-sim Full Platform Example ===\n")
 print("Compounds registered:", COMPOUNDS.names)
@@ -182,9 +190,7 @@ wastetube = PlugFlowComponentData.from_mode(
 )
 
 # T-junction mixer: 3 external ports (1 = gas in, 2 = liquid in, 3 = out)
-tmixer = JunctionData.from_mode(
-    JunctionMode(name="tmixer", number_ports=3)
-)
+tmixer = JunctionData.from_mode(JunctionMode(name="tmixer", number_ports=3))
 
 # Reactor vessel: 10 mL
 # Port numbering from vessel.internal_structure (top_access=1, bottom_access=1):
@@ -231,144 +237,222 @@ _OPERATING_P = 2.0 * ATMOSPHERE_PRESSURE_PA  # ~2.03e5 Pa — matches BPR setpoi
 
 reactor.internal_inventory.liq_content = VolumeContentBase(
     phase_kind=PhaseKind.LIQUID,
-    volume=3.0e-6,                        # 3 mL
+    volume=3.0e-6,  # 3 mL
     initial_species={
-        "reagent_a": 1.0e-4,             # 0.1 mmol
-        "solvent":   3.4e-2,             # 34 mmol (~fills 3 mL at 880 kg/m3)
+        "reagent_a": 1.0e-4,  # 0.1 mmol
+        "solvent": 3.4e-2,  # 34 mmol (~fills 3 mL at 880 kg/m3)
     },
     initial_pressure=_OPERATING_P,
     initial_temperature=298.15,
 )
 reactor.internal_inventory.gas_content = VolumeContentBase(
     phase_kind=PhaseKind.GAS,
-    volume=7.0e-6,                        # 7 mL headspace
+    volume=7.0e-6,  # 7 mL headspace
     initial_species={"nitrogen": 4.3e-1},  # mol at 1.5 bar, 298 K, 7 mL
     initial_pressure=_OPERATING_P,
     initial_temperature=298.15,
 )
 
+liq_content = reactor.internal_inventory.liq_content
+gas_content = reactor.internal_inventory.gas_content
 print(
     f"\nReactor initial inventory:"
-    f"\n  Liquid {reactor.internal_inventory.liq_content.volume*1e6:.1f} mL  "
-    f"reagent_a={reactor.internal_inventory.liq_content.initial_species['reagent_a']:.2e} mol"
-    f"\n  Gas    {reactor.internal_inventory.gas_content.volume*1e6:.1f} mL  "
-    f"nitrogen={reactor.internal_inventory.gas_content.initial_species['nitrogen']:.3f} mol"
+    f"\n  Liquid {liq_content.volume*1e6:.1f} mL  "
+    f"reagent_a={liq_content.initial_species['reagent_a']:.2e} mol"
+    f"\n  Gas    {gas_content.volume*1e6:.1f} mL  "
+    f"nitrogen={gas_content.initial_species['nitrogen']:.3f} mol"
 )
 
 
 # ---------------------------------------------------------------------------
 # Section 4 — External edges (physical tubing connections)
 # ---------------------------------------------------------------------------
-_D_SMALL = ChemUnitQuantity("1.5 mm")   # narrow inlet lines
-_D_MAIN  = ChemUnitQuantity("2 mm")     # main network lines
-_L_STUB  = ChemUnitQuantity("2 cm")     # short connector stub
+_D_SMALL = ChemUnitQuantity("1.5 mm")  # narrow inlet lines
+_D_MAIN = ChemUnitQuantity("2 mm")  # main network lines
+_L_STUB = ChemUnitQuantity("2 cm")  # short connector stub
 
 edges = [
     # -- gas supply path --
-    EdgeData.from_mode(EdgeMode(
-        name="egsgt",
-        origin="gassupply", origin_port=1,
-        destination="gastube", destination_port=1,
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_SMALL,
-    )),
-    EdgeData.from_mode(EdgeMode(
-        name="egtmixer",
-        origin="gastube", origin_port=2,
-        destination="tmixer", destination_port=1,
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_SMALL,
-    )),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="egsgt",
+            origin="gassupply",
+            origin_port=1,
+            destination="gastube",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_SMALL,
+        )
+    ),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="egtmixer",
+            origin="gastube",
+            origin_port=2,
+            destination="tmixer",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_SMALL,
+        )
+    ),
     # -- liquid pump path --
-    EdgeData.from_mode(EdgeMode(
-        name="elplt",
-        origin="liquidpump", origin_port=1,
-        destination="liquidtube", destination_port=1,
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_SMALL,
-    )),
-    EdgeData.from_mode(EdgeMode(
-        name="eltmixer",
-        origin="liquidtube", origin_port=2,
-        destination="tmixer", destination_port=2,
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_SMALL,
-    )),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="elplt",
+            origin="liquidpump",
+            origin_port=1,
+            destination="liquidtube",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_SMALL,
+        )
+    ),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="eltmixer",
+            origin="liquidtube",
+            origin_port=2,
+            destination="tmixer",
+            destination_port=2,
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_SMALL,
+        )
+    ),
     # -- mixer to reactor --
-    EdgeData.from_mode(EdgeMode(
-        name="emixerrt",
-        origin="tmixer", origin_port=3,
-        destination="reactortube", destination_port=1,
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_MAIN,
-    )),
-    EdgeData.from_mode(EdgeMode(
-        name="ertrx",
-        origin="reactortube", origin_port=2,
-        destination="reactor", destination_port=2,  # BOTTOM port 2 (mixed inlet)
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_MAIN,
-    )),
-    # -- gas outlet through BPR (TOP port 1) — narrow lines keep P_reactor above setpoint --
-    EdgeData.from_mode(EdgeMode(
-        name="erxbpr",
-        origin="reactor", origin_port=1,            # TOP port 1 (gas outlet)
-        destination="bpr", destination_port=1,
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_SMALL,
-    )),
-    EdgeData.from_mode(EdgeMode(
-        name="ebprot",
-        origin="bpr", origin_port=2,
-        destination="outlettube", destination_port=1,
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_SMALL,
-    )),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="emixerrt",
+            origin="tmixer",
+            origin_port=3,
+            destination="reactortube",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_MAIN,
+        )
+    ),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="ertrx",
+            origin="reactortube",
+            origin_port=2,
+            destination="reactor",
+            destination_port=2,  # BOTTOM port 2 (mixed inlet)
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_MAIN,
+        )
+    ),
+    # -- gas outlet through BPR (TOP port 1) --
+    # Narrow lines keep P_reactor above setpoint.
+    EdgeData.from_mode(
+        EdgeMode(
+            name="erxbpr",
+            origin="reactor",
+            origin_port=1,  # TOP port 1 (gas outlet)
+            destination="bpr",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_SMALL,
+        )
+    ),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="ebprot",
+            origin="bpr",
+            origin_port=2,
+            destination="outlettube",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_SMALL,
+        )
+    ),
     # -- divert valve --
-    EdgeData.from_mode(EdgeMode(
-        name="eotvalve",
-        origin="outlettube", origin_port=2,
-        destination="divertvalve", destination_port=0,  # valve CENTRE port
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_SMALL,
-    )),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="eotvalve",
+            origin="outlettube",
+            origin_port=2,
+            destination="divertvalve",
+            destination_port=0,  # valve CENTRE port
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_SMALL,
+        )
+    ),
     # collect path (default active: valve port 0 <-> port 1)
-    EdgeData.from_mode(EdgeMode(
-        name="evalvect",
-        origin="divertvalve", origin_port=1,
-        destination="collecttube", destination_port=1,
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_SMALL,
-    )),
-    EdgeData.from_mode(EdgeMode(
-        name="ectproduct",
-        origin="collecttube", origin_port=2,
-        destination="productsink", destination_port=1,
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_SMALL,
-    )),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="evalvect",
+            origin="divertvalve",
+            origin_port=1,
+            destination="collecttube",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_SMALL,
+        )
+    ),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="ectproduct",
+            origin="collecttube",
+            origin_port=2,
+            destination="productsink",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_SMALL,
+        )
+    ),
     # waste path (active after one CW rotation: valve port 0 <-> port 2)
-    EdgeData.from_mode(EdgeMode(
-        name="evalvewt",
-        origin="divertvalve", origin_port=2,
-        destination="wastetube", destination_port=1,
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_SMALL,
-    )),
-    EdgeData.from_mode(EdgeMode(
-        name="ewtsink",
-        origin="wastetube", origin_port=2,
-        destination="wastesink", destination_port=1,
-        classification=ConnectionType.HYDRAULIC,
-        length=_L_STUB, diameter=_D_SMALL,
-    )),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="evalvewt",
+            origin="divertvalve",
+            origin_port=2,
+            destination="wastetube",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_SMALL,
+        )
+    ),
+    EdgeData.from_mode(
+        EdgeMode(
+            name="ewtsink",
+            origin="wastetube",
+            origin_port=2,
+            destination="wastesink",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=_L_STUB,
+            diameter=_D_SMALL,
+        )
+    ),
 ]
 
 components = [
-    gassupply, liquidpump, productsink, wastesink,
-    gastube, liquidtube, reactortube, outlettube,
-    collecttube, wastetube,
-    tmixer, reactor, bpr, divertvalve,
+    gassupply,
+    liquidpump,
+    productsink,
+    wastesink,
+    gastube,
+    liquidtube,
+    reactortube,
+    outlettube,
+    collecttube,
+    wastetube,
+    tmixer,
+    reactor,
+    bpr,
+    divertvalve,
 ]
 
 print(f"\nComponents : {len(components)}")
@@ -410,9 +494,9 @@ print(
 reaction = FirstOrderDecay(
     reactant="reagent_a",
     product="product_b",
-    rate_constant=0.05,                        # 1/s
+    rate_constant=0.05,  # 1/s
     phase=PhaseKind.LIQUID,
-    delta_temperature_per_mol_converted=2.0,   # K/mol (mild exotherm)
+    delta_temperature_per_mol_converted=2.0,  # K/mol (mild exotherm)
 )
 
 reactions_map = {"reactor.Inventory": [reaction]}
@@ -442,6 +526,7 @@ print(f"\nRecording to: {db_path.name}")
 # Valve sync helper
 # ---------------------------------------------------------------------------
 
+
 def _sync_valve_to_graph(valve: ValveComponentData) -> None:
     """Propagate valve InternalEdge.resistance_override to HydraulicGraph.
 
@@ -467,12 +552,12 @@ worker = Worker(
     recorder=recorder,
 )
 
-T_VALVE_SWITCH = 20.0   # time to rotate the valve (seconds)
-valve_switched  = False
+T_VALVE_SWITCH = 20.0  # time to rotate the valve (seconds)
+valve_switched = False
 
 print(f"\n{'-'*58}")
 print(f" Running:  dt={cfg.dt} s,  t_end={cfg.t_end} s")
-print(f" Valve starts in COLLECT position (port 0 <-> port 1)")
+print(" Valve starts in COLLECT position (port 0 <-> port 1)")
 print(f"{'-'*58}")
 
 _REPORT_AT = {10.0, 20.0, 30.0, 40.0, 50.0, 60.0}
@@ -500,9 +585,9 @@ while round(worker.t / cfg.dt) <= round(cfg.t_end / cfg.dt):
     if any(abs(t_now - tr) < cfg.dt * 0.5 for tr in _REPORT_AT):
         inv = worker.inv_states.get("reactor.Inventory")
         if inv is not None:
-            n_a  = inv.liq_species_moles.get("reagent_a", 0.0)
-            n_b  = inv.liq_species_moles.get("product_b", 0.0)
-            p_b  = inv.pressure / ATMOSPHERE_PRESSURE_PA
+            n_a = inv.liq_species_moles.get("reagent_a", 0.0)
+            n_b = inv.liq_species_moles.get("product_b", 0.0)
+            p_b = inv.pressure / ATMOSPHERE_PRESSURE_PA
             frac = inv.liq_volume / max(inv.liq_volume + inv.gas_volume, 1e-30) * 100
             print(
                 f"  t={worker.t:5.1f}s  P={p_b:.3f}bar  T={inv.temperature:.2f}K"
@@ -523,10 +608,10 @@ print(f"{'-'*58}")
 
 # Reaction conversion in reactor
 inv = worker.inv_states["reactor.Inventory"]
-n_a_init  = 1.0e-4
+n_a_init = 1.0e-4
 n_a_final = inv.liq_species_moles.get("reagent_a", 0.0)
 n_b_final = inv.liq_species_moles.get("product_b", 0.0)
-conv_pct  = (n_a_init - n_a_final) / n_a_init * 100 if n_a_init > 0 else 0.0
+conv_pct = (n_a_init - n_a_final) / n_a_init * 100 if n_a_init > 0 else 0.0
 
 print("\n-- Reactor final inventory --")
 print(f"  Pressure   : {inv.pressure / ATMOSPHERE_PRESSURE_PA:.4f} bar")
@@ -542,10 +627,16 @@ hyd = worker.hyd_state
 if hyd is not None:
     print("\n-- Key pressures (bar) --")
     key_nodes = [
-        "gassupply.1", "tmixer.0", "reactor.Inventory",
-        "bpr.1", "bpr.2",
-        "divertvalve.0", "divertvalve.1", "divertvalve.2",
-        "productsink.1", "wastesink.1",
+        "gassupply.1",
+        "tmixer.0",
+        "reactor.Inventory",
+        "bpr.1",
+        "bpr.2",
+        "divertvalve.0",
+        "divertvalve.1",
+        "divertvalve.2",
+        "productsink.1",
+        "wastesink.1",
     ]
     for nid in key_nodes:
         p = hyd.pressures.get(nid)
@@ -555,11 +646,16 @@ if hyd is not None:
 # Transport queue snapshot
 print("\n-- Transport queue lengths --")
 key_edges = [
-    "gastube.1.2", "reactortube.1.2",
-    "ertrx", "erxbpr",
-    "outlettube.1.2", "eotvalve",
-    "evalvect", "evalvewt",
-    "collecttube.1.2", "wastetube.1.2",
+    "gastube.1.2",
+    "reactortube.1.2",
+    "ertrx",
+    "erxbpr",
+    "outlettube.1.2",
+    "eotvalve",
+    "evalvect",
+    "evalvewt",
+    "collecttube.1.2",
+    "wastetube.1.2",
 ]
 ts = worker.transport_state
 for eid in key_edges:
@@ -582,7 +678,8 @@ print(f"\n-- SQLite: {db_path.name} --")
 conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 try:
     tables = [
-        r[0] for r in conn.execute(
+        r[0]
+        for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         )
     ]
@@ -592,22 +689,19 @@ try:
         print(f"  {tname:<22s}: {cnt:>6d} rows")
 
     times = [
-        r[0] for r in conn.execute(
-            "SELECT DISTINCT time FROM node_pressure ORDER BY time"
-        )
+        r[0]
+        for r in conn.execute("SELECT DISTINCT time FROM node_pressure ORDER BY time")
     ]
     print(f"\n  Recorded time-points ({len(times)}): {[f'{t:.0f}s' for t in times]}")
 
     print("\n  reagent_a decay in reactor (from inventory_content):")
-    rows = conn.execute(
-        """
+    rows = conn.execute("""
         SELECT time, moles FROM inventory_content
         WHERE  node_id = 'reactor.Inventory'
           AND  phase   = 'liquid'
           AND  species_id = 'reagent_a'
         ORDER  BY time
-        """
-    ).fetchall()
+        """).fetchall()
     for t_rec, moles in rows:
         bar = "#" * max(1, int(moles / n_a_init * 30))
         print(f"    t={t_rec:5.1f}s  {moles:.4e} mol  {bar}")

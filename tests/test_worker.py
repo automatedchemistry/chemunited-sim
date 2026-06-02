@@ -16,7 +16,6 @@ import sqlite3
 import warnings
 
 import pytest
-
 from chemunited_core.common.constant import R_MAX_HYDRAULIC
 from chemunited_core.common.enums import ConnectionType
 from chemunited_core.components import (
@@ -34,10 +33,10 @@ from chemunited_sim.adapter import compile_graph
 from chemunited_sim.recorder import Recorder
 from chemunited_sim.worker import SimConfig, Worker
 
-
 # ---------------------------------------------------------------------------
 # Fixtures — minimal platform builder
 # ---------------------------------------------------------------------------
+
 
 def _make_tube_platform(
     src_bar: float = 2.0,
@@ -120,13 +119,40 @@ def _make_bpr_platform(setpoint_bar: float = 1.2):
         PressureControlMode(name="snk", setpoint=ChemUnitQuantity("1 bar"))
     )
     e1 = EdgeData.from_mode(
-        EdgeMode(name="e1", origin="src", origin_port=1, destination="tube", destination_port=1, classification=ConnectionType.HYDRAULIC, length=ChemUnitQuantity("5 cm"), diameter=ChemUnitQuantity("4 mm"))
+        EdgeMode(
+            name="e1",
+            origin="src",
+            origin_port=1,
+            destination="tube",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=ChemUnitQuantity("5 cm"),
+            diameter=ChemUnitQuantity("4 mm"),
+        )
     )
     e2 = EdgeData.from_mode(
-        EdgeMode(name="e2", origin="tube", origin_port=2, destination="bpr", destination_port=1, classification=ConnectionType.HYDRAULIC, length=ChemUnitQuantity("5 cm"), diameter=ChemUnitQuantity("4 mm"))
+        EdgeMode(
+            name="e2",
+            origin="tube",
+            origin_port=2,
+            destination="bpr",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=ChemUnitQuantity("5 cm"),
+            diameter=ChemUnitQuantity("4 mm"),
+        )
     )
     e3 = EdgeData.from_mode(
-        EdgeMode(name="e3", origin="bpr", origin_port=2, destination="snk", destination_port=1, classification=ConnectionType.HYDRAULIC, length=ChemUnitQuantity("5 cm"), diameter=ChemUnitQuantity("4 mm"))
+        EdgeMode(
+            name="e3",
+            origin="bpr",
+            origin_port=2,
+            destination="snk",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=ChemUnitQuantity("5 cm"),
+            diameter=ChemUnitQuantity("4 mm"),
+        )
     )
     components = [src, tube, bpr, snk]
     graph = compile_graph(components, [e1, e2, e3])
@@ -137,6 +163,7 @@ def _make_bpr_platform(setpoint_bar: float = 1.2):
 # 1. Import smoke test
 # ---------------------------------------------------------------------------
 
+
 def test_imports():
     assert Worker is not None
     assert SimConfig is not None
@@ -145,6 +172,7 @@ def test_imports():
 # ---------------------------------------------------------------------------
 # 2. SimConfig
 # ---------------------------------------------------------------------------
+
 
 def test_simconfig_defaults():
     cfg = SimConfig(dt=0.1, t_end=10.0)
@@ -157,6 +185,7 @@ def test_simconfig_defaults():
 # ---------------------------------------------------------------------------
 # 3. Worker initial state
 # ---------------------------------------------------------------------------
+
 
 def test_worker_initial_t():
     graph, components = _make_tube_platform()
@@ -180,6 +209,7 @@ def test_worker_initial_transport_state_has_queues():
 # ---------------------------------------------------------------------------
 # 4. step()
 # ---------------------------------------------------------------------------
+
 
 def test_step_advances_t():
     graph, components = _make_tube_platform()
@@ -222,6 +252,7 @@ def test_multiple_steps_accumulate_t():
 # 5. run()
 # ---------------------------------------------------------------------------
 
+
 def test_run_advances_past_t_end():
     graph, components = _make_tube_platform()
     cfg = SimConfig(dt=0.1, t_end=1.0)
@@ -258,6 +289,7 @@ def test_run_closes_recorder(tmp_path):
 # 6. Recorder integration
 # ---------------------------------------------------------------------------
 
+
 def test_recorder_captures_t0(tmp_path):
     """Record at t=0 should be present because step() records BEFORE advancing."""
     graph, components = _make_tube_platform()
@@ -268,9 +300,7 @@ def test_recorder_captures_t0(tmp_path):
     w.run()
 
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    times = sorted(set(
-        r[0] for r in conn.execute("SELECT time FROM node_pressure")
-    ))
+    times = sorted(set(r[0] for r in conn.execute("SELECT time FROM node_pressure")))
     conn.close()
 
     assert 0.0 in times
@@ -286,9 +316,7 @@ def test_recorder_captures_correct_interval(tmp_path):
     w.run()
 
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    times = sorted(set(
-        r[0] for r in conn.execute("SELECT time FROM node_pressure")
-    ))
+    times = sorted(set(r[0] for r in conn.execute("SELECT time FROM node_pressure")))
     conn.close()
 
     assert len(times) == 3  # t=0, 1, 2
@@ -314,6 +342,7 @@ def test_recorder_has_edge_flow_rows(tmp_path):
 # ---------------------------------------------------------------------------
 # 7. BPR stabilisation
 # ---------------------------------------------------------------------------
+
 
 def test_bpr_opens_when_upstream_exceeds_setpoint():
     """setpoint=1.2 bar: BPR should open stably without a convergence warning."""

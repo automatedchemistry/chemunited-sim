@@ -1,0 +1,483 @@
+"""FastAPI simulation server — state machine, worker thread, workflow thread."""
+
+from __future__ import annotations
+
+import heapq
+import queue
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from threading import Event, Thread
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field
+
+from chemunited_workflow.platform import Platform
+from chemunited_workflow.process import Process
+
+from ..adapter.graph import resync_component
+from ..recorder.writer import Recorder
+from ..worker.config import SimConfig
+from ..worker.runner import Worker
+from .clock import SimClock
+from .loader import (
+    ProjectState,
+    load_project,
+    parse_historical_file,
+    resolve_historical_file,
+)
+from .sim_client import SimClient, SimCommand
+
+
+# ---------------------------------------------------------------------------
+# State types
+# ---------------------------------------------------------------------------
+
+class SimStatus(str, Enum):
+    NO_PROJECT = "no_project"
+    IDLE = "idle"
+    RUNNING = "running"
+
+
+@dataclass
+class SimulationState:
+    sim_status: SimStatus
+    current_t: float
+    config: SimConfig
+    db_path: Path | None
+    project: ProjectState | None
+    clock: SimClock
+    cmd_queue: queue.Queue
+    db_dir: Path
+    _worker_thread: Thread | None = field(default=None, repr=False)
+    _workflow_thread: Thread | None = field(default=None, repr=False)
+    _stop_event: Event = field(default_factory=Event, repr=False)
+    _workflow_done: Event = field(default_factory=Event, repr=False)
+
+
+# Module-level state (initialised by main.py before uvicorn starts)
+_state: SimulationState | None = None
+
+
+def get_state() -> SimulationState:
+    if _state is None:
+        raise RuntimeError("SimulationState not initialised")
+    return _state
+
+
+# ---------------------------------------------------------------------------
+# Worker thread
+# ---------------------------------------------------------------------------
+
+def _worker_thread_fn(
+    db_path: Path,
+    project: Any,
+    clock: SimClock,
+    cmd_queue: queue.Queue,
+    config: SimConfig,
+    stop_event: Event,
+    workflow_done: Event,
+    state: SimulationState,
+) -> None:
+    # Recorder and Worker are created here so the SQLite connection belongs to this thread.
+    recorder = Recorder(
+        db_path=db_path,
+        graph=project.graph,
+        dt=config.dt,
+        record_interval=2.0,
+        platform_name=project.project_path.stem,
+    )
+    worker = Worker(
+        graph=project.graph,
+        components=list(project.components.values()),
+        config=config,
+        recorder=recorder,
+    )
+    components = project.components
+    graph = project.graph
+
+    scheduled: list[tuple[float, SimCommand]] = []
+    wall_t0 = time.monotonic()
+    sim_t0 = clock.now()
+
+    try:
+        while not stop_event.is_set():
+            # 1. Drain immediate command queue
+            while True:
+                try:
+                    cmd: SimCommand = cmd_queue.get_nowait()
+                except queue.Empty:
+                    break
+                result = components[cmd.component].apply(cmd.command, **cmd.kwargs)
+                resync_component(graph, components[cmd.component])
+                for s in result.scheduled:
+                    heapq.heappush(
+                        scheduled,
+                        (clock.now() + s.dt, SimCommand(cmd.component, s.command, s.kwargs)),
+                    )
+
+            # 2. Fire scheduled events that are now due
+            while scheduled and scheduled[0][0] <= clock.now():
+                _, sched_cmd = heapq.heappop(scheduled)
+                components[sched_cmd.component].apply(sched_cmd.command, **sched_cmd.kwargs)
+                resync_component(graph, components[sched_cmd.component])
+
+            # 3. Check t_end
+            if config.t_end is not None and worker.t >= config.t_end:
+                state.sim_status = SimStatus.IDLE
+                return
+
+            # 4. Auto-complete in mode 1: workflow finished + nothing pending
+            if (
+                not config.real_time
+                and workflow_done.is_set()
+                and cmd_queue.empty()
+                and not scheduled
+            ):
+                state.sim_status = SimStatus.IDLE
+                return
+
+            # 5. Advance simulation
+            worker.step()
+            state.current_t = worker.t
+            clock.advance(config.dt)
+
+            # 6. Real-time throttle (mode 2)
+            if config.real_time:
+                elapsed_sim = clock.now() - sim_t0
+                elapsed_wall = time.monotonic() - wall_t0
+                drift = elapsed_sim - elapsed_wall
+                if drift > 0.0:
+                    time.sleep(drift)
+
+    finally:
+        recorder.close()
+        if state.sim_status == SimStatus.RUNNING:
+            state.sim_status = SimStatus.IDLE
+
+
+# ---------------------------------------------------------------------------
+# Workflow thread (mode 1 only)
+# ---------------------------------------------------------------------------
+
+def _workflow_thread_fn(
+    process_sequence: list[tuple[str, dict]],
+    processes: dict[str, type[Process]],
+    configs: dict[str, type],
+    platform: Platform,
+    stop_event: Event,
+    workflow_done: Event,
+) -> None:
+    try:
+        for idx, (process_name, config_kwargs) in enumerate(process_sequence):
+            if stop_event.is_set():
+                break
+            process_cls = processes.get(process_name)
+            config_cls = configs.get(process_name)
+            if process_cls is None or config_cls is None:
+                continue
+            config = config_cls(**config_kwargs)
+            process = process_cls(config=config, platform=platform, process_index=idx)
+            process.run_workflow(start_node="start")
+    except Exception:
+        pass
+    finally:
+        workflow_done.set()
+
+
+# ---------------------------------------------------------------------------
+# Shared load helper (used by CLI startup + POST /project/load)
+# ---------------------------------------------------------------------------
+
+def _do_load_project(path: Path, state: SimulationState) -> None:
+    project = load_project(path)
+    state.project = project
+    state.sim_status = SimStatus.IDLE
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="chemunited-sim", version="0.1.0")
+
+
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    return RedirectResponse(url="/docs")
+
+
+# -- Request / Response models ----------------------------------------------
+
+class LoadProjectRequest(BaseModel):
+    path: str
+
+
+class StartSimRequest(BaseModel):
+    execution_id: str = Field(
+        description="Unique identifier for this run. Used as the filename: `<execution_id>.db`."
+    )
+    dt: float = Field(
+        default=0.1,
+        description="Simulation time step in seconds.",
+    )
+    t_end: float | None = Field(
+        default=None,
+        description="Simulation end time in seconds. If null the run continues until the workflow completes (mode 1) or `POST /simulation/stop` is called (mode 2).",
+    )
+    real_time: bool = Field(
+        default=False,
+        description="False → mode 1 (workflow simulation, CPU speed). True → mode 2 (real-time shadow, wall-clock pace).",
+    )
+    historical_file: str | None = Field(
+        default=None,
+        description="Mode 1 only. Filename (resolved inside `protocols_hystoric/`) or absolute path to the JSON that defines the process sequence. If null the most recently modified JSON in `protocols_hystoric/` is used.",
+    )
+
+
+class CommandRequest(BaseModel):
+    component: str
+    command: str
+    kwargs: dict = {}
+
+
+# -- Endpoints --------------------------------------------------------------
+
+@app.post("/project/load")
+def post_project_load(req: LoadProjectRequest) -> dict:
+    """Load or replace the active project.
+
+    Compiles the hydraulic graph from `draw/setup.py` and imports the process
+    classes from `protocols/__init__.py`. Accepts a project folder or a
+    `.chemunited` ZIP archive. If a sibling folder with the same name as the
+    ZIP exists it is used directly; otherwise the ZIP is extracted to a temp
+    directory.
+
+    - **409** if a simulation is currently running — stop it first.
+    - **422** if the path does not exist or the project structure is invalid.
+    """
+    state = get_state()
+
+    if state.sim_status == SimStatus.RUNNING:
+        raise HTTPException(409, "Simulation currently running — stop it before loading a new project.")
+
+    path = Path(req.path)
+    try:
+        _do_load_project(path, state)
+    except FileNotFoundError as exc:
+        raise HTTPException(422, str(exc))
+    except (ValueError, AttributeError) as exc:
+        raise HTTPException(422, str(exc))
+
+    assert state.project is not None
+    return {
+        "status": state.sim_status.value,
+        "project_path": str(state.project.project_path),
+        "components": list(state.project.components),
+    }
+
+
+@app.get("/project")
+def get_project() -> dict:
+    """Return information about the currently loaded project.
+
+    Lists every component name and every available process class. Use
+    component names in `POST /simulation/command` and process names as keys
+    in the historical JSON file.
+
+    - **404** if no project has been loaded yet.
+    """
+    state = get_state()
+    if state.project is None:
+        raise HTTPException(404, "No project loaded yet.")
+    return {
+        "project_path": str(state.project.project_path),
+        "components": list(state.project.components),
+        "processes": list(state.project.processes),
+    }
+
+
+@app.get("/status")
+def get_status() -> dict:
+    """Return the full server state.
+
+    - `sim_status`: `no_project` → `idle` → `running` (and back to `idle` on stop or auto-complete).
+    - `current_t`: simulation time in seconds, updated each worker step.
+    - `project_loaded`: `true` once `POST /project/load` has succeeded.
+    - `config`: the `SimConfig` that will be (or is being) used for the current run.
+    """
+    state = get_state()
+    return {
+        "sim_status": state.sim_status.value,
+        "current_t": state.current_t,
+        "project_loaded": state.project is not None,
+        "config": {
+            "dt": state.config.dt,
+            "t_end": state.config.t_end,
+            "real_time": state.config.real_time,
+            "viscosity": state.config.viscosity,
+        },
+    }
+
+
+@app.post("/simulation/start")
+def post_simulation_start(req: StartSimRequest) -> dict:
+    """Start a simulation run.
+
+    **Fields:**
+    - `execution_id` — a name for this run (e.g. `"react_test_01"`). The results database will be saved as `<execution_id>.db`.
+    - `dt` — how much simulated time passes per step, in seconds. Smaller values are more accurate but slower.
+    - `t_end` — when to stop, in simulated seconds. Leave null to let the run finish on its own.
+    - `real_time` — choose the simulation mode (see below).
+    - `historical_file` — which protocol sequence to run (mode 1 only). Leave null to use the latest one automatically.
+
+    **Mode 1 — Run a protocol automatically** (`real_time: false`):
+    The server replays a saved protocol at full CPU speed — much faster than real time.
+    Provide `historical_file` to pick a specific protocol sequence, or leave it null to use the latest.
+
+    **Mode 2 — Mirror a live run** (`real_time: true`):
+    The simulation keeps pace with the real instrument. Send commands as they happen via `POST /simulation/command`.
+
+    The results database is created immediately and updated live — a connected GUI can read it while the run is in progress.
+    """
+    state = get_state()
+
+    if state.project is None or state.sim_status == SimStatus.NO_PROJECT:
+        raise HTTPException(409, "No project loaded.")
+    if state.sim_status == SimStatus.RUNNING:
+        raise HTTPException(409, "Simulation already running.")
+
+    project = state.project
+    config = SimConfig(dt=req.dt, t_end=req.t_end, real_time=req.real_time)
+    state.config = config
+
+    # Prepare DB path (directory created here; Recorder opened inside the worker thread)
+    state.db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = state.db_dir / f"{req.execution_id}.db"
+    state.db_path = db_path
+
+    # Reset shared state
+    while not state.cmd_queue.empty():
+        try:
+            state.cmd_queue.get_nowait()
+        except queue.Empty:
+            break
+    state.clock.reset()
+    state._stop_event.clear()
+    state._workflow_done.clear()
+    state.current_t = 0.0
+
+    state._worker_thread = Thread(
+        target=_worker_thread_fn,
+        args=(
+            db_path,
+            project,
+            state.clock,
+            state.cmd_queue,
+            config,
+            state._stop_event,
+            state._workflow_done,
+            state,
+        ),
+        daemon=True,
+    )
+
+    if not req.real_time:
+        # Mode 1: resolve historical file and build platform
+        try:
+            hist_path = resolve_historical_file(project.project_path, req.historical_file)
+            main_parameter, process_sequence = parse_historical_file(hist_path)
+        except FileNotFoundError as exc:
+            raise HTTPException(422, str(exc))
+
+        sim_platform = Platform({  # type: ignore[arg-type]
+            name: SimClient(name, comp, state.clock, state.cmd_queue)
+            for name, comp in project.components.items()
+        })
+
+        state._workflow_thread = Thread(
+            target=_workflow_thread_fn,
+            args=(
+                process_sequence,
+                project.processes,
+                project.configs,
+                sim_platform,
+                state._stop_event,
+                state._workflow_done,
+            ),
+            daemon=True,
+        )
+    else:
+        # Mode 2: no workflow thread; mark workflow_done so worker won't wait
+        state._workflow_done.set()
+        state._workflow_thread = None
+
+    state.sim_status = SimStatus.RUNNING
+    state._worker_thread.start()
+    if state._workflow_thread is not None:
+        state._workflow_thread.start()
+
+    return {"status": "running", "db_path": str(db_path.resolve())}
+
+
+@app.post("/simulation/stop")
+def post_simulation_stop() -> dict:
+    """Abort the running simulation and return to idle.
+
+    Signals the Worker Thread and Workflow Thread (if any) to stop, then waits
+    up to 5 seconds for the Worker Thread to exit. The `.db` file is kept as-is
+    — partial data is valid and readable.
+
+    - **409** if no simulation is currently running.
+    """
+    state = get_state()
+    if state.sim_status != SimStatus.RUNNING:
+        raise HTTPException(409, "No simulation currently running.")
+    state._stop_event.set()
+    if state._worker_thread is not None:
+        state._worker_thread.join(timeout=5.0)
+    state.sim_status = SimStatus.IDLE
+    return {"status": "idle"}
+
+
+@app.post("/simulation/command")
+def post_simulation_command(req: CommandRequest) -> dict:
+    """Enqueue a component command (mode 2 — real-time only).
+
+    The command is placed on the internal queue and applied by the Worker
+    Thread at the next step boundary (between `apply()` and `step()`). Use
+    this endpoint when the work-server executes a command on real hardware and
+    wants to mirror it into the simulation.
+
+    Example body:
+    ```json
+    {"component": "AS pump", "command": "infuse", "kwargs": {"rate": "2 ml/min"}}
+    ```
+
+    - **409** if no simulation is currently running.
+    """
+    state = get_state()
+    if state.sim_status != SimStatus.RUNNING:
+        raise HTTPException(409, "No simulation currently running.")
+    state.cmd_queue.put(SimCommand(component=req.component, command=req.command, kwargs=req.kwargs))
+    return {"queued": True}
+
+
+@app.get("/simulation/db")
+def get_simulation_db() -> dict:
+    """Return the absolute path of the active or last simulation database.
+
+    The `.db` file is written in WAL mode. A GUI can open it read-only with:
+    ```python
+    sqlite3.connect("file:run.db?mode=ro", uri=True)
+    ```
+
+    - **404** if no simulation has been started in this server session.
+    """
+    state = get_state()
+    if state.db_path is None:
+        raise HTTPException(404, "No simulation has been run yet in this session.")
+    return {"db_path": str(state.db_path.resolve())}

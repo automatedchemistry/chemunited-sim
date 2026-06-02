@@ -20,10 +20,10 @@ from ..transport.models import Pocket
 from .models import InventoryState
 from .port_map import PortAccessMap
 
-
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
 
 def _merge_species(target: dict[str, float], incoming: dict[str, float]) -> None:
     """Add species moles from *incoming* into *target* in-place."""
@@ -35,6 +35,7 @@ def _merge_species(target: dict[str, float], incoming: dict[str, float]) -> None
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def assimilate(
     states: dict[str, InventoryState],
@@ -77,31 +78,35 @@ def assimilate(
 
     # Steps 2 + 3: absorb pockets and blend temperature
     for inv_node_id, pockets in arrivals.items():
-        state = states.get(inv_node_id)
-        if state is None or not pockets:
+        arrival_state = states.get(inv_node_id)
+        if arrival_state is None or not pockets:
             continue
 
         # Snapshot pre-arrival total volume for temperature blend weight
-        v_before = state.liq_volume + state.gas_volume
+        v_before = arrival_state.liq_volume + arrival_state.gas_volume
         v_arriving = sum(p.volume for p in pockets)
 
         # Absorb each pocket
         for pocket in pockets:
             if pocket.phase_kind == PhaseKind.LIQUID:
-                state.liq_volume += pocket.volume
-                _merge_species(state.liq_species_moles, pocket.species_moles)
+                arrival_state.liq_volume += pocket.volume
+                _merge_species(
+                    arrival_state.liq_species_moles,
+                    pocket.species_moles,
+                )
             else:
-                state.gas_volume += pocket.volume
-                _merge_species(state.gas_species_moles, pocket.species_moles)
+                arrival_state.gas_volume += pocket.volume
+                _merge_species(
+                    arrival_state.gas_species_moles,
+                    pocket.species_moles,
+                )
 
         # Blend temperature (volume-weighted, instantaneous equilibrium)
         if v_arriving > 0.0:
-            t_arriving = (
-                sum(p.temperature * p.volume for p in pockets) / v_arriving
-            )
+            t_arriving = sum(p.temperature * p.volume for p in pockets) / v_arriving
             total = v_before + v_arriving
-            state.temperature = (
-                v_before * state.temperature + v_arriving * t_arriving
+            arrival_state.temperature = (
+                v_before * arrival_state.temperature + v_arriving * t_arriving
             ) / total
 
 

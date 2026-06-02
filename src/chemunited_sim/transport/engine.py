@@ -21,10 +21,10 @@ from ..hydraulics.models import HydraulicState
 from .junction import merge_arriving_pockets
 from .models import Pocket, TransportResult, TransportState
 
-
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
 
 def _scale_pocket(pocket: Pocket, fraction: float) -> Pocket:
     """Return a new Pocket with volume and species scaled by *fraction*."""
@@ -194,8 +194,7 @@ def _connects_to_inventory(
     if node_id in graph.inventory_nodes:
         return True
     return any(
-        nb in graph.inventory_nodes
-        for nb, _ in junction_neighbors.get(node_id, [])
+        nb in graph.inventory_nodes for nb, _ in junction_neighbors.get(node_id, [])
     )
 
 
@@ -232,9 +231,7 @@ def _process_hub(
         Q_junc = hyd_state.flows.get(junc_edge.edge_id, 0.0)
         hub_to_port = (
             junc_edge.origin_node_id == hub_id and Q_junc > MIN_POCKET_VOLUME
-        ) or (
-            junc_edge.destination_node_id == hub_id and Q_junc < -MIN_POCKET_VOLUME
-        )
+        ) or (junc_edge.destination_node_id == hub_id and Q_junc < -MIN_POCKET_VOLUME)
         if not hub_to_port:
             continue
 
@@ -276,6 +273,7 @@ def _process_hub(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def advance(
     graph: HydraulicGraph,

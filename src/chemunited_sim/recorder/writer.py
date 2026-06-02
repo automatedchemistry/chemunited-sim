@@ -22,14 +22,14 @@ from ..adapter.models import HydraulicGraph
 from ..common.constant import RECORDER_CELL_LENGTH_M, RECORDER_INTERVAL_DEFAULT
 from ..hydraulics.models import HydraulicState
 from ..inventory.models import InventoryState
-from ..transport.models import TransportState
+from ..transport.models import Pocket, TransportState
 from .cells import build_cell_definitions
 from .models import CellDefinition
 from .schema import (
-    SQL_INSERT_EDGE_CELLS,
-    SQL_INSERT_EDGE_FLOW,
     SQL_INSERT_CELL_CONTENT,
     SQL_INSERT_CELL_STATE,
+    SQL_INSERT_EDGE_CELLS,
+    SQL_INSERT_EDGE_FLOW,
     SQL_INSERT_INVENTORY_CONTENT,
     SQL_INSERT_INVENTORY_STATE,
     SQL_INSERT_META,
@@ -215,14 +215,20 @@ class Recorder:
             inv_state_rows.append((t, node_id, state.pressure, state.temperature))
             inv_content_rows.extend(
                 _inventory_content_rows(
-                    t, node_id, "liquid",
-                    state.liq_species_moles, state.liq_volume,
+                    t,
+                    node_id,
+                    "liquid",
+                    state.liq_species_moles,
+                    state.liq_volume,
                 )
             )
             inv_content_rows.extend(
                 _inventory_content_rows(
-                    t, node_id, "gas",
-                    state.gas_species_moles, state.gas_volume,
+                    t,
+                    node_id,
+                    "gas",
+                    state.gas_species_moles,
+                    state.gas_volume,
                 )
             )
 
@@ -236,9 +242,11 @@ class Recorder:
                 continue
 
             # Build pocket intervals: (start_m, end_m, Pocket) from origin end
-            pocket_intervals: list[tuple[float, float, object]] = []
+            pocket_intervals: list[tuple[float, float, Pocket]] = []
             cursor = 0.0
-            for pocket in reversed(queue):  # deque[-1] = origin end → reversed = origin first
+            for pocket in reversed(
+                queue
+            ):  # deque[-1] = origin end → reversed = origin first
                 pocket_len = pocket.volume / area
                 pocket_intervals.append((cursor, cursor + pocket_len, pocket))
                 cursor += pocket_len
@@ -278,15 +286,28 @@ class Recorder:
                     phase_str = ph.name.lower()
                     phase_fraction = vol / cell_vol
                     temperature = phase_vol_temp[ph] / vol
-                    cell_state_rows.append((
-                        t, edge_id, cell_def.cell_index,
-                        phase_str, phase_fraction, temperature,
-                    ))
+                    cell_state_rows.append(
+                        (
+                            t,
+                            edge_id,
+                            cell_def.cell_index,
+                            phase_str,
+                            phase_fraction,
+                            temperature,
+                        )
+                    )
                     sp_dict = phase_species.get(ph, {})
                     for sp, mol in sp_dict.items():
-                        cell_content_rows.append((
-                            t, edge_id, cell_def.cell_index, phase_str, sp, mol,
-                        ))
+                        cell_content_rows.append(
+                            (
+                                t,
+                                edge_id,
+                                cell_def.cell_index,
+                                phase_str,
+                                sp,
+                                mol,
+                            )
+                        )
 
         try:
             with self._conn:
@@ -314,6 +335,7 @@ class Recorder:
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
 
 def _inventory_content_rows(
     t: float,

@@ -16,7 +16,12 @@ dependencies = [
     "chemunited-workflow @ git+https://github.com/automatedchemistry/chemunited-workflow.git",
     "numpy>=1.26",
     "scipy>=1.12",
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.23",
 ]
+
+[project.scripts]
+chemunited-sim = "chemunited_sim.cli.main:main"
 
 [project.optional-dependencies]
 dev = [

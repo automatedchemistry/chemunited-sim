@@ -213,3 +213,7 @@ AGENTS.md
 
 # examples
 examples/simulation
+simulations/
+
+# pre-commit
+.pre-commit-cache*

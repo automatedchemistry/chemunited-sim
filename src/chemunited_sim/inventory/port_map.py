@@ -112,9 +112,7 @@ def build_port_map(
             inv_node_id = port_to_inv[node_id]
             access = _get_access(node_id)
             if access is not None:
-                port_map[eid] = EdgePortAccess(
-                    inv_node_id=inv_node_id, access=access
-                )
+                port_map[eid] = EdgePortAccess(inv_node_id=inv_node_id, access=access)
                 break  # each edge has at most one inventory endpoint
 
     return port_map

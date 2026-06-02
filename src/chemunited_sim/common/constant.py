@@ -6,8 +6,8 @@ defined here and nowhere else — never redefine them inline in solver code.
 """
 
 from chemunited_core.common.constant import (  # noqa: F401
-    ATMOSPHERE_PRESSURE_PA,
     AMBIENT_TEMPERATURE_K,
+    ATMOSPHERE_PRESSURE_PA,
     R_MAX_HYDRAULIC,
 )
 

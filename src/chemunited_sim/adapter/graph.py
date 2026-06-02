@@ -21,6 +21,23 @@ from .compilers import _COMPILERS, compile_component
 from .models import HydraulicEdge, HydraulicGraph, HydraulicNode
 
 
+def resync_component(graph: HydraulicGraph, comp: ComponentData) -> None:
+    """Propagate resistance_override from ComponentData into HydraulicGraph.
+
+    Called immediately after ComponentData.apply(). Topology is never changed;
+    only edge attributes are written.
+
+    HydraulicNode.boundary is a shared reference (not deep-copied at compile
+    time), so flow-source and pressure-control updates propagate automatically
+    via sync_internal_state() — no node propagation needed here.
+    """
+    for (origin, dest), internal_edge in comp.internal_edges.items():
+        edge_id = f"{comp.name}.{origin}.{dest}"
+        hydraulic_edge = graph.edges.get(edge_id)
+        if hydraulic_edge is not None:
+            hydraulic_edge.resistance_override = internal_edge.resistance_override
+
+
 def compile_graph(
     components: list[ComponentData],
     edges: list[EdgeData],

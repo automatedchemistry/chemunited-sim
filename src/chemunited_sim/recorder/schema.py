@@ -67,7 +67,9 @@ CREATE TABLE IF NOT EXISTS inventory_content (
     volume     REAL NOT NULL
 );
 """
-SQL_IDX_INVENTORY_CONTENT = "CREATE INDEX IF NOT EXISTS idx_inventory_content_time ON inventory_content (time);"
+SQL_IDX_INVENTORY_CONTENT = (
+    "CREATE INDEX IF NOT EXISTS idx_inventory_content_time ON inventory_content (time);"
+)
 
 SQL_CREATE_EDGE_FLOW = """
 CREATE TABLE IF NOT EXISTS edge_flow (
@@ -76,9 +78,7 @@ CREATE TABLE IF NOT EXISTS edge_flow (
     flow_rate REAL NOT NULL
 );
 """
-SQL_IDX_EDGE_FLOW = (
-    "CREATE INDEX IF NOT EXISTS idx_edge_flow_time ON edge_flow (time);"
-)
+SQL_IDX_EDGE_FLOW = "CREATE INDEX IF NOT EXISTS idx_edge_flow_time ON edge_flow (time);"
 
 SQL_CREATE_CELL_STATE = """
 CREATE TABLE IF NOT EXISTS cell_state (
@@ -114,25 +114,35 @@ SQL_IDX_CELL_CONTENT = (
 
 SQL_INSERT_META = "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?);"
 SQL_INSERT_EDGE_CELLS = (
-    "INSERT INTO edge_cells (edge_id, cell_index, position_m, length_m) VALUES (?, ?, ?, ?);"
+    "INSERT INTO edge_cells "
+    "(edge_id, cell_index, position_m, length_m) "
+    "VALUES (?, ?, ?, ?);"
 )
 SQL_INSERT_NODE_PRESSURE = (
     "INSERT INTO node_pressure (time, node_id, pressure) VALUES (?, ?, ?);"
 )
 SQL_INSERT_INVENTORY_STATE = (
-    "INSERT INTO inventory_state (time, node_id, pressure, temperature) VALUES (?, ?, ?, ?);"
+    "INSERT INTO inventory_state "
+    "(time, node_id, pressure, temperature) "
+    "VALUES (?, ?, ?, ?);"
 )
 SQL_INSERT_INVENTORY_CONTENT = (
-    "INSERT INTO inventory_content (time, node_id, phase, species_id, moles, volume) VALUES (?, ?, ?, ?, ?, ?);"
+    "INSERT INTO inventory_content "
+    "(time, node_id, phase, species_id, moles, volume) "
+    "VALUES (?, ?, ?, ?, ?, ?);"
 )
 SQL_INSERT_EDGE_FLOW = (
     "INSERT INTO edge_flow (time, edge_id, flow_rate) VALUES (?, ?, ?);"
 )
 SQL_INSERT_CELL_STATE = (
-    "INSERT INTO cell_state (time, edge_id, cell_index, phase, phase_fraction, temperature) VALUES (?, ?, ?, ?, ?, ?);"
+    "INSERT INTO cell_state "
+    "(time, edge_id, cell_index, phase, phase_fraction, temperature) "
+    "VALUES (?, ?, ?, ?, ?, ?);"
 )
 SQL_INSERT_CELL_CONTENT = (
-    "INSERT INTO cell_content (time, edge_id, cell_index, phase, species_id, moles) VALUES (?, ?, ?, ?, ?, ?);"
+    "INSERT INTO cell_content "
+    "(time, edge_id, cell_index, phase, species_id, moles) "
+    "VALUES (?, ?, ?, ?, ?, ?);"
 )
 
 # All DDL statements in creation order

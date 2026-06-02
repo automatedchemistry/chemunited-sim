@@ -29,12 +29,14 @@ from chemunited_core.components import (
     VesselComponentData,
 )
 from chemunited_core.components.enums import InternalEdgeRole, PortClosure
+from chemunited_core.figure_registry.pipes import SinkData
 
 from .models import HydraulicEdge, HydraulicNode
 
 # ---------------------------------------------------------------------------
 # Shared helper
 # ---------------------------------------------------------------------------
+
 
 def _is_hydraulic_active(port) -> bool:  # type: ignore[no-untyped-def]
     """Return ``True`` if *port* should become a hydraulic node.
@@ -43,14 +45,14 @@ def _is_hydraulic_active(port) -> bool:  # type: ignore[no-untyped-def]
     its closure is not ``PortClosure.CAPPED``.
     """
     return (
-        port.category == ConnectionType.HYDRAULIC
-        and port.closure != PortClosure.CAPPED
+        port.category == ConnectionType.HYDRAULIC and port.closure != PortClosure.CAPPED
     )
 
 
 # ---------------------------------------------------------------------------
 # PlugFlowComponentData
 # ---------------------------------------------------------------------------
+
 
 def compile_plugflow(
     comp: PlugFlowComponentData,
@@ -110,6 +112,7 @@ def compile_plugflow(
 # ---------------------------------------------------------------------------
 # VesselComponentData
 # ---------------------------------------------------------------------------
+
 
 def compile_vessel(
     comp: VesselComponentData,
@@ -184,6 +187,7 @@ def compile_vessel(
 # ValveComponentData
 # ---------------------------------------------------------------------------
 
+
 def compile_valve(
     comp: ValveComponentData,
 ) -> tuple[list[HydraulicNode], list[HydraulicEdge]]:
@@ -244,6 +248,7 @@ def compile_valve(
 # FlowSourceData
 # ---------------------------------------------------------------------------
 
+
 def compile_flow_source(
     comp: FlowSourceData,
 ) -> tuple[list[HydraulicNode], list[HydraulicEdge]]:
@@ -293,6 +298,7 @@ def compile_flow_source(
 # PressureControlData
 # ---------------------------------------------------------------------------
 
+
 def compile_pressure_control(
     comp: PressureControlData,
 ) -> tuple[list[HydraulicNode], list[HydraulicEdge]]:
@@ -334,6 +340,7 @@ def compile_pressure_control(
 # ---------------------------------------------------------------------------
 # BackPressureRegulatorData
 # ---------------------------------------------------------------------------
+
 
 def compile_bpr(
     comp: BackPressureRegulatorData,
@@ -401,6 +408,7 @@ def compile_bpr(
 # ---------------------------------------------------------------------------
 # JunctionData
 # ---------------------------------------------------------------------------
+
 
 def compile_junction(
     comp: JunctionData,
@@ -473,6 +481,7 @@ def compile_junction(
 # ---------------------------------------------------------------------------
 # Generic fallback
 # ---------------------------------------------------------------------------
+
 
 def compile_component(
     comp: ComponentData,
@@ -552,12 +561,16 @@ def compile_component(
 # Mapping from ComponentData subtype to its dedicated compiler function.
 # Falls back to compile_component for any type not listed here.
 # Dispatch uses exact type(comp) -- not isinstance/MRO.
-_COMPILERS: dict[type, Callable[..., tuple[list[HydraulicNode], list[HydraulicEdge]]]] = {
-    PlugFlowComponentData:     compile_plugflow,
-    VesselComponentData:       compile_vessel,
-    ValveComponentData:        compile_valve,
-    FlowSourceData:            compile_flow_source,
-    PressureControlData:       compile_pressure_control,
+_COMPILERS: dict[
+    type, Callable[..., tuple[list[HydraulicNode], list[HydraulicEdge]]]
+] = {
+    PlugFlowComponentData: compile_plugflow,
+    VesselComponentData: compile_vessel,
+    # SinkData subclasses VesselComponentData; exact-type dispatch needs it here.
+    SinkData: compile_vessel,
+    ValveComponentData: compile_valve,
+    FlowSourceData: compile_flow_source,
+    PressureControlData: compile_pressure_control,
     BackPressureRegulatorData: compile_bpr,
-    JunctionData:              compile_junction,
+    JunctionData: compile_junction,
 }

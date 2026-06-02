@@ -14,7 +14,6 @@ import numpy as np
 import scipy.sparse
 import scipy.sparse.csgraph
 import scipy.sparse.linalg
-
 from chemunited_core.common.constant import ATMOSPHERE_PRESSURE_PA
 from chemunited_core.components.enums import BoundaryConditionKind, InternalEdgeRole
 
@@ -196,9 +195,7 @@ def solve(
             f"Hydraulic solve failed — check graph connectivity: {exc}"
         ) from exc
 
-    pressures: dict[str, float] = {
-        node_ids[i]: float(P[i]) for i in range(n)
-    }
+    pressures: dict[str, float] = {node_ids[i]: float(P[i]) for i in range(n)}
 
     # ------------------------------------------------------------------
     # Back-compute signed edge flows: Q_ij = G_ij · (P_i − P_j)
