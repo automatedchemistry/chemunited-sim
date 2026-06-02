@@ -84,6 +84,7 @@ from chemunited_core.utils.internal_quantity import ChemUnitQuantity
 from chemunited_sim.adapter import HydraulicNode, compile_graph
 from chemunited_sim.reactions import FirstOrderDecay
 from chemunited_sim.recorder import Recorder
+from chemunited_sim.visualization import load_latest_snapshot, render_pyvis_html
 from chemunited_sim.worker import SimConfig, Worker
 
 # ---------------------------------------------------------------------------
@@ -711,3 +712,15 @@ finally:
 print(f"\n{'='*58}")
 print(" Example finished successfully.")
 print(f"{'='*58}")
+
+
+html_path = _sim_dir / f"fullplatform_{_ts}.html"
+snapshot = load_latest_snapshot(db_path)
+html_path.write_text(
+    render_pyvis_html(graph=graph, components=components, snapshot=snapshot),
+    encoding="utf-8",
+)
+
+print("\n-- Pyvis HTML export --")
+print(f"  Wrote: {html_path}")
+print("  Hover nodes/edges to inspect the latest recorded pressures and flows.")

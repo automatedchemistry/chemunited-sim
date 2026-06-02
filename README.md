@@ -56,6 +56,10 @@ Starts a FastAPI server at `http://localhost:<port>`.  OpenAPI docs at
 | `POST` | `/simulation/stop` | Abort the running simulation |
 | `POST` | `/simulation/command` | Enqueue a component command (mode 2 only) |
 | `GET` | `/simulation/db` | Path of the active or last `.db` file |
+| `GET` | `/simulation/visualization` | Interactive pyvis graph for the latest recorded snapshot |
+
+Open `http://127.0.0.1:1472/simulation/visualization` in a browser to inspect
+the latest available simulation snapshot.
 
 ### Server state machine
 

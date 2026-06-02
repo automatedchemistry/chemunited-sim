@@ -28,7 +28,7 @@ def _compute_resistance(edge: HydraulicEdge, viscosity: float) -> float:
     Decision tree:
 
     1. ``resistance_override is not None`` → return the override directly.
-    2. ``role == JUNCTION`` → return :data:`R_JUNCTION` (1 µPa·s/m³).
+    2. ``role == JUNCTION`` → return :data:`R_JUNCTION`.
     3. Otherwise (TRANSPORT) → Hagen–Poiseuille:
        ``R = (128·η·L) / (π·D⁴)``.
 

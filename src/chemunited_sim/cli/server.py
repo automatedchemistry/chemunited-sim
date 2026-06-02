@@ -11,15 +11,20 @@ from pathlib import Path
 from threading import Event, Thread
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
-
 from chemunited_workflow.platform import Platform
 from chemunited_workflow.process import Process
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import BaseModel, Field
 
 from ..adapter.graph import resync_component
 from ..recorder.writer import Recorder
+from ..visualization import (
+    NoSnapshotsError,
+    SnapshotReadError,
+    load_latest_snapshot,
+    render_pyvis_html,
+)
 from ..worker.config import SimConfig
 from ..worker.runner import Worker
 from .clock import SimClock
@@ -31,10 +36,10 @@ from .loader import (
 )
 from .sim_client import SimClient, SimCommand
 
-
 # ---------------------------------------------------------------------------
 # State types
 # ---------------------------------------------------------------------------
+
 
 class SimStatus(str, Enum):
     NO_PROJECT = "no_project"
@@ -72,6 +77,7 @@ def get_state() -> SimulationState:
 # Worker thread
 # ---------------------------------------------------------------------------
 
+
 def _worker_thread_fn(
     db_path: Path,
     project: Any,
@@ -82,7 +88,8 @@ def _worker_thread_fn(
     workflow_done: Event,
     state: SimulationState,
 ) -> None:
-    # Recorder and Worker are created here so the SQLite connection belongs to this thread.
+    # Recorder and Worker are created here so the SQLite connection belongs
+    # to this thread.
     recorder = Recorder(
         db_path=db_path,
         graph=project.graph,
@@ -116,13 +123,18 @@ def _worker_thread_fn(
                 for s in result.scheduled:
                     heapq.heappush(
                         scheduled,
-                        (clock.now() + s.dt, SimCommand(cmd.component, s.command, s.kwargs)),
+                        (
+                            clock.now() + s.dt,
+                            SimCommand(cmd.component, s.command, s.kwargs),
+                        ),
                     )
 
             # 2. Fire scheduled events that are now due
             while scheduled and scheduled[0][0] <= clock.now():
                 _, sched_cmd = heapq.heappop(scheduled)
-                components[sched_cmd.component].apply(sched_cmd.command, **sched_cmd.kwargs)
+                components[sched_cmd.component].apply(
+                    sched_cmd.command, **sched_cmd.kwargs
+                )
                 resync_component(graph, components[sched_cmd.component])
 
             # 3. Check t_end
@@ -163,6 +175,7 @@ def _worker_thread_fn(
 # Workflow thread (mode 1 only)
 # ---------------------------------------------------------------------------
 
+
 def _workflow_thread_fn(
     process_sequence: list[tuple[str, dict]],
     processes: dict[str, type[Process]],
@@ -192,6 +205,7 @@ def _workflow_thread_fn(
 # Shared load helper (used by CLI startup + POST /project/load)
 # ---------------------------------------------------------------------------
 
+
 def _do_load_project(path: Path, state: SimulationState) -> None:
     project = load_project(path)
     state.project = project
@@ -212,13 +226,17 @@ def root() -> RedirectResponse:
 
 # -- Request / Response models ----------------------------------------------
 
+
 class LoadProjectRequest(BaseModel):
     path: str
 
 
 class StartSimRequest(BaseModel):
     execution_id: str = Field(
-        description="Unique identifier for this run. Used as the filename: `<execution_id>.db`."
+        description=(
+            "Unique identifier for this run. Used as the filename: "
+            "`<execution_id>.db`."
+        )
     )
     dt: float = Field(
         default=0.1,
@@ -226,15 +244,27 @@ class StartSimRequest(BaseModel):
     )
     t_end: float | None = Field(
         default=None,
-        description="Simulation end time in seconds. If null the run continues until the workflow completes (mode 1) or `POST /simulation/stop` is called (mode 2).",
+        description=(
+            "Simulation end time in seconds. If null the run continues until "
+            "the workflow completes (mode 1) or `POST /simulation/stop` is "
+            "called (mode 2)."
+        ),
     )
     real_time: bool = Field(
         default=False,
-        description="False → mode 1 (workflow simulation, CPU speed). True → mode 2 (real-time shadow, wall-clock pace).",
+        description=(
+            "False -> mode 1 (workflow simulation, CPU speed). True -> mode 2 "
+            "(real-time shadow, wall-clock pace)."
+        ),
     )
     historical_file: str | None = Field(
         default=None,
-        description="Mode 1 only. Filename (resolved inside `protocols_hystoric/`) or absolute path to the JSON that defines the process sequence. If null the most recently modified JSON in `protocols_hystoric/` is used.",
+        description=(
+            "Mode 1 only. Filename resolved inside `protocols_hystoric/`, or "
+            "an absolute path to the JSON that defines the process sequence. "
+            "If null, the most recently modified JSON in "
+            "`protocols_hystoric/` is used."
+        ),
     )
 
 
@@ -245,6 +275,7 @@ class CommandRequest(BaseModel):
 
 
 # -- Endpoints --------------------------------------------------------------
+
 
 @app.post("/project/load")
 def post_project_load(req: LoadProjectRequest) -> dict:
@@ -262,7 +293,9 @@ def post_project_load(req: LoadProjectRequest) -> dict:
     state = get_state()
 
     if state.sim_status == SimStatus.RUNNING:
-        raise HTTPException(409, "Simulation currently running — stop it before loading a new project.")
+        raise HTTPException(
+            409, "Simulation currently running — stop it before loading a new project."
+        )
 
     path = Path(req.path)
     try:
@@ -304,7 +337,8 @@ def get_project() -> dict:
 def get_status() -> dict:
     """Return the full server state.
 
-    - `sim_status`: `no_project` → `idle` → `running` (and back to `idle` on stop or auto-complete).
+    - `sim_status`: `no_project` -> `idle` -> `running` and back to
+      `idle` on stop or auto-complete.
     - `current_t`: simulation time in seconds, updated each worker step.
     - `project_loaded`: `true` once `POST /project/load` has succeeded.
     - `config`: the `SimConfig` that will be (or is being) used for the current run.
@@ -328,20 +362,20 @@ def post_simulation_start(req: StartSimRequest) -> dict:
     """Start a simulation run.
 
     **Fields:**
-    - `execution_id` — a name for this run (e.g. `"react_test_01"`). The results database will be saved as `<execution_id>.db`.
-    - `dt` — how much simulated time passes per step, in seconds. Smaller values are more accurate but slower.
-    - `t_end` — when to stop, in simulated seconds. Leave null to let the run finish on its own.
-    - `real_time` — choose the simulation mode (see below).
-    - `historical_file` — which protocol sequence to run (mode 1 only). Leave null to use the latest one automatically.
+    - `execution_id`: name for this run, used as `<execution_id>.db`.
+    - `dt`: how much simulated time passes per step, in seconds.
+    - `t_end`: when to stop, in simulated seconds.
+    - `real_time`: choose the simulation mode.
+    - `historical_file`: protocol sequence to run in mode 1.
 
     **Mode 1 — Run a protocol automatically** (`real_time: false`):
-    The server replays a saved protocol at full CPU speed — much faster than real time.
-    Provide `historical_file` to pick a specific protocol sequence, or leave it null to use the latest.
+    The server replays a saved protocol at full CPU speed.
 
     **Mode 2 — Mirror a live run** (`real_time: true`):
-    The simulation keeps pace with the real instrument. Send commands as they happen via `POST /simulation/command`.
+    The simulation keeps pace with the real instrument. Send commands via
+    `POST /simulation/command`.
 
-    The results database is created immediately and updated live — a connected GUI can read it while the run is in progress.
+    The results database is created immediately and updated live.
     """
     state = get_state()
 
@@ -354,7 +388,7 @@ def post_simulation_start(req: StartSimRequest) -> dict:
     config = SimConfig(dt=req.dt, t_end=req.t_end, real_time=req.real_time)
     state.config = config
 
-    # Prepare DB path (directory created here; Recorder opened inside the worker thread)
+    # Prepare DB path. The Recorder is opened inside the worker thread.
     state.db_dir.mkdir(parents=True, exist_ok=True)
     db_path = state.db_dir / f"{req.execution_id}.db"
     state.db_path = db_path
@@ -388,15 +422,19 @@ def post_simulation_start(req: StartSimRequest) -> dict:
     if not req.real_time:
         # Mode 1: resolve historical file and build platform
         try:
-            hist_path = resolve_historical_file(project.project_path, req.historical_file)
+            hist_path = resolve_historical_file(
+                project.project_path, req.historical_file
+            )
             main_parameter, process_sequence = parse_historical_file(hist_path)
         except FileNotFoundError as exc:
             raise HTTPException(422, str(exc))
 
-        sim_platform = Platform({  # type: ignore[arg-type]
-            name: SimClient(name, comp, state.clock, state.cmd_queue)
-            for name, comp in project.components.items()
-        })
+        sim_platform = Platform(
+            {  # type: ignore[arg-type]
+                name: SimClient(name, comp, state.clock, state.cmd_queue)
+                for name, comp in project.components.items()
+            }
+        )
 
         state._workflow_thread = Thread(
             target=_workflow_thread_fn,
@@ -462,7 +500,9 @@ def post_simulation_command(req: CommandRequest) -> dict:
     state = get_state()
     if state.sim_status != SimStatus.RUNNING:
         raise HTTPException(409, "No simulation currently running.")
-    state.cmd_queue.put(SimCommand(component=req.component, command=req.command, kwargs=req.kwargs))
+    state.cmd_queue.put(
+        SimCommand(component=req.component, command=req.command, kwargs=req.kwargs)
+    )
     return {"queued": True}
 
 
@@ -481,3 +521,36 @@ def get_simulation_db() -> dict:
     if state.db_path is None:
         raise HTTPException(404, "No simulation has been run yet in this session.")
     return {"db_path": str(state.db_path.resolve())}
+
+
+@app.get("/simulation/visualization", response_class=HTMLResponse)
+def get_simulation_visualization() -> HTMLResponse:
+    """Return an interactive pyvis graph for the latest recorded snapshot.
+
+    Open this endpoint directly in a browser to inspect the current or most
+    recent simulation run.
+
+    - **404** if no project has been loaded.
+    - **404** if no simulation database has been created yet.
+    - **409** if the database exists but has no recorded snapshots yet.
+    - **422** if the database cannot be opened or read.
+    """
+    state = get_state()
+    if state.project is None:
+        raise HTTPException(404, "No project loaded yet.")
+    if state.db_path is None or not state.db_path.exists():
+        raise HTTPException(404, "No simulation database exists yet.")
+
+    try:
+        snapshot = load_latest_snapshot(state.db_path)
+        html = render_pyvis_html(
+            graph=state.project.graph,
+            components=state.project.components.values(),
+            snapshot=snapshot,
+        )
+    except NoSnapshotsError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except SnapshotReadError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    return HTMLResponse(content=html)

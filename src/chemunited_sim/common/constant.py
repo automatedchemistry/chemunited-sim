@@ -16,8 +16,8 @@ from chemunited_core.common.constant import (  # noqa: F401
 # ---------------------------------------------------------------------------
 
 # Epsilon resistance for JUNCTION-role edges.  Keeps the admittance matrix
-# non-singular while imposing negligible pressure drop.  Unit: Pa·s/m³.
-R_JUNCTION: float = 1e-6
+# well-conditioned while imposing negligible pressure drop.  Unit: Pa·s/m³.
+R_JUNCTION: float = 1e3
 
 # Default dynamic viscosity for water at 25 °C.  Unit: Pa·s.
 ETA_WATER_25C: float = 8.9e-4

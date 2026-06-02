@@ -48,7 +48,7 @@ P_reactor ≈ P_sink + R_downstream × Q
 
 With the outlet lines narrowed to D = 1.5 mm the downstream resistance is
 roughly **3× larger** than the upstream resistance (short 5 cm reactortube,
-D = 2 mm).  This pushes the reactor pressure to ≈ 2.45 bar, comfortably above
+D = 2 mm).  This pushes the reactor pressure to ≈ 2.38 bar, comfortably above
 the 2 bar setpoint, so the BPR opens and stays open from the first step.
 
 If you reverse this ratio (long upstream tube, wide outlet) the reactor settles
@@ -103,6 +103,9 @@ text-mode bar chart of `reagent_a` decay read back from the SQLite database.
 A timestamped `.db` file is written to `examples/simulation/` and can be
 opened with any SQLite viewer.
 
+The script also writes a timestamped interactive `.html` graph to
+`examples/simulation/`.
+
 ---
 
 ### Output tables in the SQLite database
@@ -122,7 +125,7 @@ opened with any SQLite viewer.
 
 ### Expected results (approximate)
 
-- Reactor pressure stable at **≈ 2.45 bar** throughout
+- Reactor pressure stable at **≈ 2.38 bar** throughout
 - Liquid volume constant at **3.0 mL** (batch liquid, continuous gas)
 - `reagent_a` conversion reaches **≈ 95 %** by t = 60 s
 - Flow routes through `collecttube` for 0–20 s, then through `wastetube`
