@@ -25,7 +25,7 @@ class HydraulicNode:
     Represents one of:
     - A component port:         node_id = "component_name.port_number"
     - A vessel inventory node:  node_id = "component_name.Inventory"
-    - A junction hub port:      node_id = "component_name.0",  is_hub=True
+    - A routing hub port:       node_id = "component_name.0",  is_hub=True
 
     Nodes are immutable once compiled. Boundary conditions are copied verbatim
     from Port.boundary at compile time and never mutated.
@@ -35,7 +35,8 @@ class HydraulicNode:
         boundary:  Hydraulic boundary condition for terminal nodes (pumps,
                    pressure controllers). None means the node is internal --
                    both pressure and flow are solved by the network.
-        is_hub:    True only for the central hub port (port 0) of JunctionData.
+        is_hub:    True for zero-volume routing hubs, such as the central
+                   port of a junction or selector valve.
         component: Owning component name, used by the recorder.
     """
 

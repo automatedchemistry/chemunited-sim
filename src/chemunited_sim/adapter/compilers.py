@@ -49,6 +49,13 @@ def _is_hydraulic_active(port) -> bool:  # type: ignore[no-untyped-def]
     )
 
 
+def _is_hub_port(port, port_number: int | str, comp) -> bool:  # type: ignore[no-untyped-def]
+    """Return True when a port should stage and route transport pockets."""
+    return bool(getattr(port, "is_hub", False)) or (
+        isinstance(comp, ValveComponentData) and port_number == 0
+    )
+
+
 # ---------------------------------------------------------------------------
 # PlugFlowComponentData
 # ---------------------------------------------------------------------------
@@ -217,7 +224,7 @@ def compile_valve(
             HydraulicNode(
                 node_id=f"{comp.name}.{port_number}",
                 boundary=port.boundary,
-                is_hub=False,
+                is_hub=_is_hub_port(port, port_number, comp),
                 component=comp.name,
             )
         )

@@ -101,7 +101,10 @@ def compile_graph(
             raise ValueError(f"Duplicate component name '{comp.name}'")
         seen_names.add(comp.name)
 
-        compiler = _COMPILERS.get(type(comp), compile_component)
+        compiler = next(
+            (_COMPILERS[cls] for cls in type(comp).mro() if cls in _COMPILERS),
+            compile_component,
+        )
         nodes, comp_edges = compiler(comp)
 
         for node in nodes:
