@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 import networkx as nx
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,8 +30,12 @@ class CustomProcess(Process[ProcessConfig]):
         ctx.runtime.status_message = "Simulation running."
         return True
 
-    async def wait(self, ctx: NodeExecutionContext) -> bool:
-        await asyncio.sleep(self.config.wait_time)
+    def wait(self, _ctx: NodeExecutionContext) -> bool:
+        self.platform["divertvalve"].wait_sim_time(20.0)
+        self.platform["divertvalve"].put("close")
+        remaining = max(0.0, self.config.wait_time - 20.0)
+        if remaining > 0.0:
+            self.platform["divertvalve"].wait_sim_time(remaining)
         return True
 
     def finish(self, ctx: NodeExecutionContext) -> bool:

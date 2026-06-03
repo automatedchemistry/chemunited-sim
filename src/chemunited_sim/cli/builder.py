@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from chemunited_core.common.enums import ConnectionType
+from loguru import logger
+
+from chemunited_core.common.enums import ConnectionType, PhaseKind
 from chemunited_core.components import ComponentData, NeutralComponentData
 from chemunited_core.compounds import COMPOUNDS, ChemicalEntity
 from chemunited_core.connections.edge import EdgeData, EdgeMode
 from chemunited_core.figure_registry import COMPONENTS
+
+from ..reactions import FirstOrderDecay, ReactionsMap
 
 
 class PlatformBuilder:
@@ -19,6 +23,7 @@ class PlatformBuilder:
     def __init__(self) -> None:
         self._components: dict[str, ComponentData] = {}
         self._edges: list[EdgeData] = []
+        self._reactions_map: ReactionsMap = {}
 
     def add_component(
         self,
@@ -39,6 +44,7 @@ class PlatformBuilder:
         mode = mode_cls(name=name, position=position, angle=angle, **kwargs)
         data = data_cls.from_mode(mode)
         self._components[name] = data
+        logger.debug("Component added | name='{}' figure='{}'", name, figure)
         return data
 
     def add_connection(
@@ -67,6 +73,7 @@ class PlatformBuilder:
         )
         edge = EdgeData.from_mode(mode)
         self._edges.append(edge)
+        logger.debug("Edge added | {}.{} -> {}.{}", origin, origin_port, destiny, destiny_port)
         return edge
 
     def add_compound(
@@ -88,9 +95,35 @@ class PlatformBuilder:
                 density_liquid=density_liquid,
             )
         )
+        logger.debug("Compound registered | name='{}' MW={}", name, molecular_weight)
 
-    def add_reaction(self):
-        pass
+    def add_reaction(
+        self,
+        target: str,
+        reaction_type: str,
+        reactant: str,
+        product: str,
+        rate_constant: float,
+        phase: str | PhaseKind = "LIQUID",
+        delta_temperature_per_mol_converted: float = 0.0,
+    ) -> None:
+        if reaction_type != "FirstOrderDecay":
+            raise ValueError(f"Unknown reaction_type '{reaction_type}'. Only 'FirstOrderDecay' is supported.")
+        node_id = f"{target}.Inventory"
+        phase_kind = PhaseKind(phase.lower()) if isinstance(phase, str) else phase
+        reaction = FirstOrderDecay(
+            reactant=reactant,
+            product=product,
+            rate_constant=rate_constant,
+            phase=phase_kind,
+            delta_temperature_per_mol_converted=delta_temperature_per_mol_converted,
+        )
+        self._reactions_map.setdefault(node_id, []).append(reaction)
+        logger.debug("Reaction added | target='{}' type='{}' reactant='{}' -> product='{}'", target, reaction_type, reactant, product)
+
+    @property
+    def reactions_map(self) -> ReactionsMap:
+        return dict(self._reactions_map)
 
     def add_component_data(self, data: ComponentData) -> ComponentData:
         """Add a pre-created ComponentData directly, bypassing the figure registry."""

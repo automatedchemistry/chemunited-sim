@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from chemunited_core.components import ComponentData
+from chemunited_core.compounds import COMPOUNDS
 from chemunited_workflow.process import Process
+from loguru import logger
 
 from ..adapter.graph import compile_graph
 from ..adapter.models import HydraulicGraph
@@ -25,6 +27,7 @@ class ProjectState:
     configs: dict[str, type]   # process name → ProcessConfig class
     components: dict[str, ComponentData]
     graph: HydraulicGraph
+    reactions_map: dict | None = None
 
 
 def _resolve_project_dir(path: Path) -> Path:
@@ -73,6 +76,7 @@ def load_project(path: Path) -> ProjectState:
         If setup.py lacks build_draw or protocols/__init__.py lacks PROCESSES.
     """
     project_dir = _resolve_project_dir(path)
+    logger.info("Resolved project directory: {}", project_dir)
 
     setup_path = project_dir / "draw" / "setup.py"
     if not setup_path.exists():
@@ -83,6 +87,7 @@ def load_project(path: Path) -> ProjectState:
         raise FileNotFoundError(f"protocols/__init__.py not found in {project_dir}")
 
     # Import draw/setup.py and run build_draw
+    logger.debug("Importing draw/setup.py from {}", setup_path)
     setup_module = _import_module_from_path(
         f"_chemunited_draw_{project_dir.name}", setup_path
     )
@@ -96,6 +101,7 @@ def load_project(path: Path) -> ProjectState:
     if protocols_parent not in sys.path:
         sys.path.insert(0, protocols_parent)
 
+    logger.debug("Importing protocols/__init__.py from {}", protocols_init)
     protocols_module = _import_module_from_path(
         f"_chemunited_protocols_{project_dir.name}", protocols_init
     )
@@ -106,16 +112,30 @@ def load_project(path: Path) -> ProjectState:
 
     processes: dict[str, type[Process]] = protocols_module.PROCESSES
     configs: dict[str, type] = getattr(protocols_module, "CONFIGS", {})
+    logger.info("Processes available: {}", list(processes))
 
+    COMPOUNDS.clear()
     builder = PlatformBuilder()
+    logger.debug("Running build_draw()")
     setup_module.build_draw(builder)
+    logger.info(
+        "build_draw complete | components={} edges={}",
+        len(builder.components), len(builder.edges),
+    )
 
+    logger.debug("Compiling hydraulic graph")
     graph = compile_graph(builder.hydraulic_components, builder.edges)
 
     if hasattr(setup_module, "build_graph_patch"):
+        logger.debug("Applying build_graph_patch()")
         setup_module.build_graph_patch(graph)
 
     components = {c.name: c for c in builder.components}
+    reactions_map = builder.reactions_map or None
+    logger.info(
+        "Project '{}' ready | {} component(s) | reactions_map={}",
+        project_dir.name, len(components), reactions_map is not None,
+    )
 
     return ProjectState(
         project_path=project_dir,
@@ -123,6 +143,7 @@ def load_project(path: Path) -> ProjectState:
         configs=configs,
         components=components,
         graph=graph,
+        reactions_map=reactions_map,
     )
 
 
@@ -141,12 +162,17 @@ def resolve_historical_file(project_dir: Path, filename: str | None) -> Path:
         )
         if not candidates:
             raise FileNotFoundError(f"No JSON files in {historic_dir}")
-        return candidates[0]
+        chosen = candidates[0]
+        logger.info("Auto-selected historical file: {}", chosen.name)
+        return chosen
 
     candidate = Path(filename)
     if candidate.is_absolute():
+        logger.info("Using absolute historical file: {}", candidate)
         return candidate
-    return historic_dir / filename
+    resolved = historic_dir / filename
+    logger.info("Using historical file: {}", resolved.name)
+    return resolved
 
 
 def parse_historical_file(path: Path) -> tuple[dict, list[tuple[str, dict]]]:
@@ -154,6 +180,7 @@ def parse_historical_file(path: Path) -> tuple[dict, list[tuple[str, dict]]]:
 
     process_sequence is sorted by the integer suffix of each <Name>_<index> key.
     """
+    logger.debug("Parsing historical file: {}", path.name)
     data: dict = json.loads(path.read_text(encoding="utf-8"))
     main_parameter = data.get("main_parameter", {})
 
@@ -167,4 +194,8 @@ def parse_historical_file(path: Path) -> tuple[dict, list[tuple[str, dict]]]:
 
     entries.sort(key=lambda e: e[0])
     process_sequence = [(name, kwargs) for _, name, kwargs in entries]
+    logger.info(
+        "Historical file '{}' parsed | {} process step(s): {}",
+        path.name, len(process_sequence), [n for n, _ in process_sequence],
+    )
     return main_parameter, process_sequence

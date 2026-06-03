@@ -102,3 +102,13 @@ def build_draw(platform) -> None:
     platform.add_connection(
         "wastetube", "wastesink", 2, 1, length="2 cm", diameter="1.5 mm"
     )
+
+    # ── Reactions ──────────────────────────────────────────────────────────────
+    platform.add_reaction(
+        "reactor", "FirstOrderDecay",
+        reactant="reagent_a",
+        product="product_b",
+        rate_constant=0.05,
+        phase="LIQUID",
+        delta_temperature_per_mol_converted=2.0,
+    )
