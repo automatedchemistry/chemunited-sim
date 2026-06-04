@@ -21,8 +21,8 @@ def build_draw(platform) -> None:
     platform.add_component(
         name="liquidpump", figure="SyringePump", flow_rate="3 ml/min"
     )
-    platform.add_component(name="productsink", figure="Sink", setpoint="1 bar")
-    platform.add_component(name="wastesink", figure="Sink", setpoint="1 bar")
+    platform.add_component(name="productsink", figure="Sink")
+    platform.add_component(name="wastesink", figure="Sink")
     platform.add_component(
         name="gastube", figure="Loop", length="10 cm", diameter="1.5 mm"
     )
@@ -108,7 +108,7 @@ def build_draw(platform) -> None:
         "reactor", "FirstOrderDecay",
         reactant="reagent_a",
         product="product_b",
-        rate_constant=0.05,
+        rate_constant=0.3,
         phase="LIQUID",
         delta_temperature_per_mol_converted=2.0,
     )

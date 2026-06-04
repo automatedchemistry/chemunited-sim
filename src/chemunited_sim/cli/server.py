@@ -14,7 +14,7 @@ from typing import Any
 from chemunited_workflow.platform import Platform
 from chemunited_workflow.process import Process
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,7 @@ from ..visualization import (
     NoSnapshotsError,
     SnapshotReadError,
     load_latest_snapshot,
+    render_dashboard_html,
     render_pyvis_html,
 )
 from ..worker.config import SimConfig
@@ -554,12 +555,15 @@ def get_simulation_db() -> dict:
     return {"db_path": str(state.db_path.resolve())}
 
 
-@app.get("/simulation/visualization", response_class=HTMLResponse)
-def get_simulation_visualization() -> HTMLResponse:
-    """Return an interactive pyvis graph for the latest recorded snapshot.
+@app.get("/simulation/visualization")
+def get_simulation_visualization() -> dict:
+    """Generate and save visualization files for the latest recorded snapshot.
 
-    Open this endpoint directly in a browser to inspect the current or most
-    recent simulation run.
+    Saves two files alongside the simulation database:
+    - ``{stem}_graph.html`` — interactive pyvis network graph
+    - ``{stem}_dashboard.html`` — time-series HTML dashboard
+
+    Returns the absolute paths to both files.
 
     - **404** if no project has been loaded.
     - **404** if no simulation database has been created yet.
@@ -574,14 +578,26 @@ def get_simulation_visualization() -> HTMLResponse:
 
     try:
         snapshot = load_latest_snapshot(state.db_path)
-        html = render_pyvis_html(
+        graph_html = render_pyvis_html(
             graph=state.project.graph,
             components=state.project.components.values(),
             snapshot=snapshot,
         )
+        dashboard_html = render_dashboard_html(state.db_path)
     except NoSnapshotsError as exc:
         raise HTTPException(409, str(exc)) from exc
     except SnapshotReadError as exc:
         raise HTTPException(422, str(exc)) from exc
 
-    return HTMLResponse(content=html)
+    stem = state.db_path.stem
+    folder = state.db_path.parent
+    graph_path = folder / f"{stem}_graph.html"
+    dashboard_path = folder / f"{stem}_dashboard.html"
+
+    graph_path.write_text(graph_html, encoding="utf-8")
+    dashboard_path.write_text(dashboard_html, encoding="utf-8")
+
+    return {
+        "graph_html": str(graph_path.resolve()),
+        "dashboard_html": str(dashboard_path.resolve()),
+    }
