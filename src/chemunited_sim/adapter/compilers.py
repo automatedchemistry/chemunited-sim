@@ -573,8 +573,6 @@ _COMPILERS: dict[
 ] = {
     PlugFlowComponentData: compile_plugflow,
     VesselComponentData: compile_vessel,
-    # SinkData subclasses VesselComponentData; exact-type dispatch needs it here.
-    SinkData: compile_vessel,
     ValveComponentData: compile_valve,
     FlowSourceData: compile_flow_source,
     PressureControlData: compile_pressure_control,

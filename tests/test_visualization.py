@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import queue
+import re
 import shutil
+import sqlite3
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +31,7 @@ from chemunited_sim.visualization import (
     NoSnapshotsError,
     VisualizationSnapshot,
     load_latest_snapshot,
+    render_dashboard_html,
     render_pyvis_html,
 )
 from chemunited_sim.worker import SimConfig
@@ -132,6 +136,16 @@ def _write_recorded_db(db_path: Path, graph: HydraulicGraph) -> None:
         rec.close()
 
 
+def _dashboard_payload(html_text: str) -> dict:
+    match = re.search(
+        r'<script id="dashboard-data" type="application/json">(.*?)</script>',
+        html_text,
+        re.DOTALL,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
+
+
 def test_load_latest_snapshot_reads_latest_time(workspace_tmp):
     graph = _simple_graph()
     db_path = workspace_tmp / "run.db"
@@ -221,6 +235,101 @@ def test_render_pyvis_html_scales_flow_pressure_and_temperature():
     assert '"width": 8.0' in html
 
 
+def test_render_dashboard_html_builds_analysis_cockpit_payload(workspace_tmp):
+    graph = _simple_graph()
+    db_path = workspace_tmp / "dashboard.db"
+    _write_recorded_db(db_path, graph)
+
+    html = render_dashboard_html(db_path)
+    payload = _dashboard_payload(html)
+
+    assert "Plotly.react" in html
+    assert 'data-tab="overview"' in html
+    assert 'data-search="pressures"' in html
+    assert payload["summary"]["sampleCount"] == 2
+    assert payload["summary"]["timeStart"] == 0.0
+    assert payload["summary"]["timeEnd"] == 1.0
+    assert {chart["tab"] for chart in payload["charts"]} >= {
+        "pressures",
+        "flows",
+        "inventories",
+        "temperatures",
+    }
+
+
+def test_render_dashboard_html_hides_flat_traces_by_default(workspace_tmp):
+    graph = _simple_graph()
+    db_path = workspace_tmp / "flat.db"
+    _write_recorded_db(db_path, graph)
+
+    payload = _dashboard_payload(render_dashboard_html(db_path))
+    pressure_chart = next(
+        chart for chart in payload["charts"] if chart["id"] == "node_pressures"
+    )
+    traces = {trace["name"]: trace for trace in pressure_chart["traces"]}
+
+    assert traces["n0"]["flat"] is False
+    assert traces["n0"]["defaultVisible"] is True
+    assert traces["n1"]["flat"] is True
+    assert traces["n1"]["defaultVisible"] is False
+
+
+def test_render_dashboard_html_escapes_metadata(workspace_tmp):
+    graph = _simple_graph()
+    db_path = workspace_tmp / "escaped.db"
+    _write_recorded_db(db_path, graph)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE meta SET value = ? WHERE key = 'platform_name'",
+        ("<script>alert(1)</script>&",),
+    )
+    conn.execute(
+        "INSERT INTO node_pressure VALUES (?, ?, ?)",
+        (0.0, "<script>alert(1)</script>&", 101_325.0),
+    )
+    conn.commit()
+    conn.close()
+
+    html = render_dashboard_html(db_path)
+
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;&amp;" in html
+    assert "\\u003cscript\\u003ealert(1)\\u003c/script\\u003e\\u0026" in html
+
+
+def test_render_dashboard_html_handles_missing_optional_tables(workspace_tmp):
+    db_path = workspace_tmp / "minimal.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE meta (key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE node_pressure (
+            time REAL NOT NULL,
+            node_id TEXT NOT NULL,
+            pressure REAL NOT NULL
+        );
+        CREATE TABLE edge_flow (
+            time REAL NOT NULL,
+            edge_id TEXT NOT NULL,
+            flow_rate REAL NOT NULL
+        );
+        INSERT INTO meta VALUES ('platform_name', 'minimal');
+        INSERT INTO node_pressure VALUES (0.0, 'n0', 101325.0);
+        INSERT INTO edge_flow VALUES (0.0, 'e0', 0.0);
+        """
+    )
+    conn.close()
+
+    html = render_dashboard_html(db_path)
+    payload = _dashboard_payload(html)
+
+    assert "No inventory state traces were recorded." in html
+    assert {chart["id"] for chart in payload["charts"]} == {
+        "node_pressures",
+        "edge_flows",
+    }
+
+
 def load_latest_snapshot_from_rows(
     *,
     pressures: dict[str, float],
@@ -295,7 +404,7 @@ def test_visualization_endpoint_rejects_db_without_snapshots(workspace_tmp):
     assert response.status_code == 409
 
 
-def test_visualization_endpoint_returns_inline_html(workspace_tmp):
+def test_visualization_endpoint_writes_visualization_files(workspace_tmp):
     graph = _simple_graph()
     db_path = workspace_tmp / "run.db"
     _write_recorded_db(db_path, graph)
@@ -308,9 +417,16 @@ def test_visualization_endpoint_returns_inline_html(workspace_tmp):
     response = TestClient(app).get("/simulation/visualization")
 
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/html")
-    assert "n0" in response.text
-    assert "e1" in response.text
+    assert response.headers["content-type"].startswith("application/json")
+    data = response.json()
+    graph_html = Path(data["graph_html"])
+    dashboard_html = Path(data["dashboard_html"])
+    assert graph_html.exists()
+    assert dashboard_html.exists()
+    assert "n0" in graph_html.read_text(encoding="utf-8")
+    dashboard_text = dashboard_html.read_text(encoding="utf-8")
+    assert "Plotly.react" in dashboard_text
+    assert "e1" in dashboard_text
 
 
 def test_visualization_endpoint_rejects_unreadable_db(workspace_tmp):

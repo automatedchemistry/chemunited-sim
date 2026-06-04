@@ -362,7 +362,7 @@ def _edge_title(
         f"diameter: {edge.diameter:.4g} m",
     ]
     if flow is not None:
-        title.append(f"flow: {flow * 1e9:+.4f} nL/s")
+        title.append(f"flow: {flow * 6e7:+.4f} mL/min")
     if edge.resistance_override is not None:
         title.append(f"resistance override: {edge.resistance_override:.4e} Pa*s/m3")
 
