@@ -41,7 +41,9 @@ class SimClient:
 
     def put(self, command: str, *, wait_time: float = 0.0, **kwargs: Any) -> None:
         t0 = self._clock.now()
-        self._queue.put(SimCommand(component=self._name, command=command, kwargs=kwargs))
+        self._queue.put(
+            SimCommand(component=self._name, command=command, kwargs=kwargs)
+        )
         while self._clock.now() - t0 < wait_time:
             time.sleep(0.0001)
 

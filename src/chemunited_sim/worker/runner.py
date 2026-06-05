@@ -5,13 +5,14 @@ correct order every time step and delegates all physics to them.  No physics
 logic lives here.
 
 Operator-splitting order (CLAUDE.md):
-  1. solve hydraulics  (with BPR edge stabilisation)
-  2. advance transport
-  3. assimilate
-  4. react
-  5. emit
-  6. inject
-  7. advance time → record if due
+  1. solve hydraulics
+  2. update MFC and BPR resistances for next tick
+  3. advance transport
+  4. assimilate
+  5. react
+  6. emit
+  7. inject
+  8. advance time → record if due
 """
 
 from __future__ import annotations
@@ -19,8 +20,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from chemunited_core.common.constant import R_MAX_HYDRAULIC
-from chemunited_core.components import ComponentData
-from loguru import logger
+from chemunited_core.components import (
+    BackPressureRegulatorData,
+    ComponentData,
+    MassFlowControllerData,
+)
 
 from ..adapter.models import HydraulicEdge, HydraulicGraph
 from ..hydraulics.models import HydraulicState
@@ -44,39 +48,69 @@ from .config import SimConfig
 
 @dataclass
 class _BprEntry:
-    """Pre-resolved BPR edge metadata for fast per-step toggling."""
+    """Pre-resolved BPR edge metadata for fast per-tick resistance update."""
 
     edge: HydraulicEdge
+    edge_id: str
     setpoint_pa: float
     upstream_node_id: str
+    downstream_node_id: str
+
+
+@dataclass
+class _MfcEntry:
+    """Pre-resolved MFC edge metadata for fast per-step resistance update."""
+
+    comp: MassFlowControllerData
+    upstream_node_id: str
+    downstream_node_id: str
+    edge: HydraulicEdge
 
 
 def _build_bpr_entries(
     graph: HydraulicGraph,
     components: list[ComponentData],
 ) -> list[_BprEntry]:
-    """Resolve BPR metadata from the graph's bpr_edges list.
-
-    Uses duck typing (``hasattr(comp, 'setpoint_pa')``) so the worker does
-    not need to import the concrete ``BackPressureRegulatorData`` class.
-
-    The upstream node is ``edge.origin_node_id`` — the BPR always places
-    port 1 (upstream) at the edge origin.
-    """
-    comp_by_name: dict[str, ComponentData] = {c.name: c for c in components}
+    """Resolve BPR metadata from the component list."""
     entries: list[_BprEntry] = []
-    for edge_id in graph.bpr_edges:
-        edge = graph.edges.get(edge_id)
-        if edge is None or edge.component is None:
+    for comp in components:
+        if not isinstance(comp, BackPressureRegulatorData):
             continue
-        comp = comp_by_name.get(edge.component)
-        if comp is None or not hasattr(comp, "setpoint_pa"):
+        edge_id = f"{comp.name}.1.2"
+        edge = graph.edges.get(edge_id)
+        if edge is None:
             continue
         entries.append(
             _BprEntry(
                 edge=edge,
-                setpoint_pa=float(comp.setpoint_pa),  # type: ignore[union-attr]
-                upstream_node_id=edge.origin_node_id,
+                edge_id=edge_id,
+                setpoint_pa=comp.setpoint_pa,
+                upstream_node_id=f"{comp.name}.1",
+                downstream_node_id=f"{comp.name}.2",
+            )
+        )
+    return entries
+
+
+def _build_mfc_entries(
+    graph: HydraulicGraph,
+    components: list[ComponentData],
+) -> list[_MfcEntry]:
+    """Resolve MFC metadata from the compiled graph."""
+    entries: list[_MfcEntry] = []
+    for comp in components:
+        if not isinstance(comp, MassFlowControllerData):
+            continue
+        edge_id = f"{comp.name}.1.2"
+        edge = graph.edges.get(edge_id)
+        if edge is None:
+            continue
+        entries.append(
+            _MfcEntry(
+                comp=comp,
+                upstream_node_id=f"{comp.name}.1",
+                downstream_node_id=f"{comp.name}.2",
+                edge=edge,
             )
         )
     return entries
@@ -94,18 +128,18 @@ class Worker:
     :meth:`step` (single time step) and :meth:`run` (full simulation) as the
     primary interface.
 
-    **BPR stabilisation**: before each step the hydraulic solve is iterated
-    until the set of open BPR edges no longer changes (converges in O(1)
-    iterations for well-posed networks).  A warning is logged if
-    ``config.bpr_max_iters`` is exhausted without convergence.
+    **BPR and MFC**: after each hydraulic solve, resistance overrides for BPR
+    and MFC edges are updated from the solved pressures and flows so that the
+    next tick's solve uses the correct values.  BPR uses a proportional model
+    (resistance = excess_dp / Q) that drives upstream pressure toward the
+    setpoint.  MFC uses resistance = dp / setpoint_flow.
 
     Parameters
     ----------
     graph:
         Compiled hydraulic graph (produced by ``adapter.compile_graph``).
     components:
-        All live component instances in the simulation domain.  Passed to
-        the inventory port-map builder and used to resolve BPR setpoints.
+        All live component instances in the simulation domain.
     config:
         Time-stepping and solver parameters.
     reactions_map:
@@ -134,6 +168,7 @@ class Worker:
         self._inv_states: dict[str, InventoryState] = build_inventory_states(graph)
         self._port_map: PortAccessMap = build_port_map(graph, components)
         self._bpr_entries: list[_BprEntry] = _build_bpr_entries(graph, components)
+        self._mfc_entries: list[_MfcEntry] = _build_mfc_entries(graph, components)
 
         self._t: float = 0.0
         self._hyd_state: HydraulicState | None = None
@@ -173,31 +208,64 @@ class Worker:
         ``recorder.record(t=0)`` captures the initial condition.  After
         returning, :attr:`t` has been incremented by ``config.dt``.
         """
-        # 1. Solve hydraulics (with BPR edge stabilisation)
-        hyd_state = self._solve_stable()
+        # 1. Solve hydraulics
+        hyd_state = solve(self._graph, self._config.viscosity)
 
-        # 2. Record current state at self._t
+        # 2a. Update MFC resistance from this tick's ΔP for the next solve
+        for entry in self._mfc_entries:
+            dp = hyd_state.pressures.get(
+                entry.upstream_node_id, 0.0
+            ) - hyd_state.pressures.get(entry.downstream_node_id, 0.0)
+            entry.comp.update_resistance(dp)
+            entry.edge.resistance_override = entry.comp.internal_edges[
+                (1, 2)
+            ].resistance_override
+
+        # 2b. Update BPR resistance from this tick's pressure and flow.
+        # When closed, P_upstream is genuine — use it to decide whether to open.
+        # When open, P_upstream = P_downstream (JUNCTION R=0) and cannot be used
+        # for the open/close decision.  Instead, compute R = (setpoint − P_down) / Q
+        # to drive P_upstream toward the setpoint.  If P_downstream already exceeds
+        # the setpoint, set R=None (fully open) and let the network settle naturally.
+        for bpr_entry in self._bpr_entries:
+            was_closed = bpr_entry.edge.resistance_override == R_MAX_HYDRAULIC
+            if was_closed:
+                p_up = hyd_state.pressures.get(bpr_entry.upstream_node_id, 0.0)
+                if p_up <= bpr_entry.setpoint_pa:
+                    bpr_entry.edge.resistance_override = R_MAX_HYDRAULIC
+                else:
+                    bpr_entry.edge.resistance_override = None
+            else:
+                p_down = hyd_state.pressures.get(bpr_entry.downstream_node_id, 0.0)
+                target_dp = bpr_entry.setpoint_pa - p_down
+                q = abs(hyd_state.flows.get(bpr_entry.edge_id, 0.0))
+                if target_dp > 0 and q > 0:
+                    bpr_entry.edge.resistance_override = target_dp / q or None
+                else:
+                    bpr_entry.edge.resistance_override = None
+
+        # 3. Record current state at self._t
         if self._recorder is not None:
             self._recorder.record(
                 self._t, hyd_state, self._transport_state, self._inv_states
             )
 
-        # 3. Advance transport
+        # 4. Advance transport
         result = advance(self._graph, hyd_state, self._transport_state, self._config.dt)
 
-        # 4. Assimilate arriving pockets into inventories
+        # 5. Assimilate arriving pockets into inventories
         assimilate(self._inv_states, result.arrivals, hyd_state)
 
-        # 5. Apply reactions
+        # 6. Apply reactions
         apply(self._inv_states, self._reactions_map, self._config.dt)
 
-        # 6. Emit replacement pockets from inventories
+        # 7. Emit replacement pockets from inventories
         emitted = emit(self._inv_states, result.departures, self._port_map)
 
-        # 7. Inject emitted pockets into transport queues
+        # 8. Inject emitted pockets into transport queues
         self._transport_state = inject(result.next_state, emitted, hyd_state)
 
-        # 8. Advance time
+        # 9. Advance time
         self._t += self._config.dt
         self._hyd_state = hyd_state
 
@@ -227,42 +295,3 @@ class Worker:
             self.step()
         if self._recorder is not None:
             self._recorder.close()
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _solve_stable(self) -> HydraulicState:
-        """Solve hydraulics with iterative BPR edge stabilisation.
-
-        If there are no BPR edges the solver is called exactly once.
-        Otherwise, solves, toggles BPR edges that changed state, and
-        repeats until the edge set is stable or ``bpr_max_iters`` is reached.
-        A warning is logged when the iteration limit is hit.
-        """
-        if not self._bpr_entries:
-            return solve(self._graph, self._config.viscosity)
-
-        for iteration in range(self._config.bpr_max_iters):
-            hyd_state = solve(self._graph, self._config.viscosity)
-            changed = False
-            for entry in self._bpr_entries:
-                p_upstream = hyd_state.pressures.get(entry.upstream_node_id, 0.0)
-                should_open = p_upstream >= entry.setpoint_pa
-                is_open = entry.edge.resistance_override is None
-                if should_open != is_open:
-                    if should_open:
-                        entry.edge.resistance_override = None
-                    else:
-                        entry.edge.resistance_override = R_MAX_HYDRAULIC
-                    changed = True
-            if not changed:
-                return hyd_state
-
-        logger.warning(
-            "Worker._solve_stable: BPR edge set did not converge after "
-            "{} iterations at t={:.6f} s. Check network configuration.",
-            self._config.bpr_max_iters,
-            self._t,
-        )
-        return solve(self._graph, self._config.viscosity)

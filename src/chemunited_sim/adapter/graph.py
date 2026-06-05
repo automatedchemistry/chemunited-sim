@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 
 from chemunited_core.common.enums import ConnectionType
-from chemunited_core.components import BackPressureRegulatorData, ComponentData
+from chemunited_core.components import ComponentData
 from chemunited_core.components.enums import InternalEdgeRole
 from chemunited_core.components.internals import InventoryNode
 from chemunited_core.connections.edge import EdgeData
@@ -91,7 +91,6 @@ def compile_graph(
     all_nodes: dict[str, HydraulicNode] = {}
     all_edges: dict[str, HydraulicEdge] = {}
     all_inventory: dict[str, InventoryNode] = {}
-    bpr_edge_ids: list[str] = []
 
     # ------------------------------------------------------------------
     # Pass 1: component compilers
@@ -117,10 +116,6 @@ def compile_graph(
             inv_id = f"{comp.name}.Inventory"
             all_inventory[inv_id] = copy.deepcopy(comp.internal_inventory)
 
-        # Register BPR edges for the in-place worker
-        if isinstance(comp, BackPressureRegulatorData):
-            bpr_edge_ids.extend(e.edge_id for e in comp_edges)
-
     # ------------------------------------------------------------------
     # Pass 2: external edges
     # ------------------------------------------------------------------
@@ -141,7 +136,8 @@ def compile_graph(
             continue
         if dest_node_id not in all_nodes:
             logger.warning(
-                "compile_graph: skipping edge '{}' - destination node '{}' not in graph "
+                "compile_graph: skipping edge '{}' - destination node '{}' not in "
+                "graph "
                 "(port may be CAPPED or component missing).",
                 edge_data.name,
                 dest_node_id,
@@ -170,5 +166,4 @@ def compile_graph(
         nodes=all_nodes,
         edges=all_edges,
         inventory_nodes=all_inventory,
-        bpr_edges=bpr_edge_ids,
     )

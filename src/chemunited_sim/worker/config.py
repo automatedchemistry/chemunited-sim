@@ -21,14 +21,9 @@ class SimConfig:
     viscosity:
         Dynamic viscosity of the carrier fluid in Pa·s.  Defaults to water
         at 25 °C (8.9 × 10⁻⁴ Pa·s).
-    bpr_max_iters:
-        Maximum number of hydraulic solve iterations per step to stabilise
-        the active BPR edge set.  Convergence is typically reached in 2–3
-        iterations.  A warning is logged if the limit is hit.
     """
 
     dt: float = 0.1
     t_end: float | None = None
     real_time: bool = False
     viscosity: float = ETA_WATER_25C
-    bpr_max_iters: int = 20

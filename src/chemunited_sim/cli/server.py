@@ -141,7 +141,12 @@ def _worker_thread_fn(
     wall_t0 = time.monotonic()
     sim_t0 = clock.now()
 
-    logger.info("Worker thread started | db={} dt={} t_end={}", db_path.name, config.dt, config.t_end)
+    logger.info(
+        "Worker thread started | db={} dt={} t_end={}",
+        db_path.name,
+        config.dt,
+        config.t_end,
+    )
 
     try:
         while not stop_event.is_set():
@@ -151,7 +156,12 @@ def _worker_thread_fn(
                     cmd: SimCommand = cmd_queue.get_nowait()
                 except queue.Empty:
                     break
-                logger.debug("Applying command | component={} command={} kwargs={}", cmd.component, cmd.command, cmd.kwargs)
+                logger.debug(
+                    "Applying command | component={} command={} kwargs={}",
+                    cmd.component,
+                    cmd.command,
+                    cmd.kwargs,
+                )
                 result = components[cmd.component].apply(cmd.command, **cmd.kwargs)
                 resync_component(graph, components[cmd.component])
                 for s in result.scheduled:
@@ -166,7 +176,12 @@ def _worker_thread_fn(
             # 2. Fire scheduled events that are now due
             while scheduled and scheduled[0][0] <= clock.now():
                 _, sched_cmd = heapq.heappop(scheduled)
-                logger.debug("Firing scheduled command | component={} command={} t={:.3f}", sched_cmd.component, sched_cmd.command, clock.now())
+                logger.debug(
+                    "Firing scheduled command | component={} command={} t={:.3f}",
+                    sched_cmd.component,
+                    sched_cmd.command,
+                    clock.now(),
+                )
                 components[sched_cmd.component].apply(
                     sched_cmd.command, **sched_cmd.kwargs
                 )
@@ -174,7 +189,9 @@ def _worker_thread_fn(
 
             # 3. Check t_end
             if config.t_end is not None and worker.t >= config.t_end:
-                logger.info("Simulation reached t_end={:.3f} — stopping worker", config.t_end)
+                logger.info(
+                    "Simulation reached t_end={:.3f} — stopping worker", config.t_end
+                )
                 state.sim_status = SimStatus.IDLE
                 return
 
@@ -185,7 +202,10 @@ def _worker_thread_fn(
                 and cmd_queue.empty()
                 and not scheduled
             ):
-                logger.info("Workflow finished and queues empty — auto-completing at t={:.3f}", worker.t)
+                logger.info(
+                    "Workflow finished and queues empty — auto-completing at t={:.3f}",
+                    worker.t,
+                )
                 state.sim_status = SimStatus.IDLE
                 return
 
@@ -229,12 +249,22 @@ def _workflow_thread_fn(
     try:
         for idx, (process_name, config_kwargs) in enumerate(process_sequence):
             if stop_event.is_set():
-                logger.warning("Workflow interrupted by stop event at process {}/{} ({})", idx + 1, total, process_name)
+                logger.warning(
+                    "Workflow interrupted by stop event at process {}/{} ({})",
+                    idx + 1,
+                    total,
+                    process_name,
+                )
                 break
             process_cls = processes.get(process_name)
             config_cls = configs.get(process_name)
             if process_cls is None or config_cls is None:
-                logger.warning("Skipping unknown process '{}' (step {}/{})", process_name, idx + 1, total)
+                logger.warning(
+                    "Skipping unknown process '{}' (step {}/{})",
+                    process_name,
+                    idx + 1,
+                    total,
+                )
                 continue
             logger.info("Running process {}/{}: {}", idx + 1, total, process_name)
             config = config_cls(**config_kwargs)
@@ -510,7 +540,11 @@ def post_simulation_start(req: StartSimRequest) -> dict:
     mode = "mode 2 (real-time)" if req.real_time else "mode 1 (workflow)"
     logger.info(
         "Starting simulation | {} | execution_id={} dt={} t_end={} db={}",
-        mode, req.execution_id, config.dt, config.t_end, db_path.name,
+        mode,
+        req.execution_id,
+        config.dt,
+        config.t_end,
+        db_path.name,
     )
     state.sim_status = SimStatus.RUNNING
     state._worker_thread.start()
@@ -561,7 +595,12 @@ def post_simulation_command(req: CommandRequest) -> dict:
     state = get_state()
     if state.sim_status != SimStatus.RUNNING:
         raise HTTPException(409, "No simulation currently running.")
-    logger.debug("Command enqueued | component={} command={} kwargs={}", req.component, req.command, req.kwargs)
+    logger.debug(
+        "Command enqueued | component={} command={} kwargs={}",
+        req.component,
+        req.command,
+        req.kwargs,
+    )
     state.cmd_queue.put(
         SimCommand(component=req.component, command=req.command, kwargs=req.kwargs)
     )

@@ -18,7 +18,6 @@ from typing import Callable
 
 from chemunited_core.common.enums import ConnectionType
 from chemunited_core.components import (
-    BackPressureRegulatorData,
     ComponentData,
     FlowSourceData,
     JunctionData,
@@ -28,7 +27,6 @@ from chemunited_core.components import (
     VesselComponentData,
 )
 from chemunited_core.components.enums import InternalEdgeRole, PortClosure
-from chemunited_core.figure_registry.pipes import SinkData
 from loguru import logger
 
 from .models import HydraulicEdge, HydraulicNode
@@ -344,74 +342,6 @@ def compile_pressure_control(
 
 
 # ---------------------------------------------------------------------------
-# BackPressureRegulatorData
-# ---------------------------------------------------------------------------
-
-
-def compile_bpr(
-    comp: BackPressureRegulatorData,
-) -> tuple[list[HydraulicNode], list[HydraulicEdge]]:
-    """Compile a back-pressure regulator into a binary junction edge.
-
-    A BPR is modelled as a binary open/close element with no geometry-based
-    resistance.  The edge role is ``JUNCTION`` and geometry fields are ``0.0``.
-    ``resistance_override`` carries the current state: ``R_MAX_HYDRAULIC``
-    (closed) or ``None`` (open, R = 0 under JUNCTION semantics).
-
-    The BPR edge is registered in ``HydraulicGraph.bpr_edges`` by
-    :func:`~chemunited_sim.adapter.graph.compile_graph` so that the in-place
-    worker can update it each tick without re-traversing the full edge dict.
-
-    Parameters
-    ----------
-    comp:
-        The source back-pressure regulator component.
-
-    Returns
-    -------
-    tuple[list[HydraulicNode], list[HydraulicEdge]]
-        Nodes for each active port and at most one junction edge.
-    """
-    nodes: list[HydraulicNode] = []
-    valid_port_numbers: set[int | str] = set()
-
-    for port_number in (1, 2):
-        port = comp.ports_by_number.get(port_number)
-        if port is None:
-            continue
-        if not _is_hydraulic_active(port):
-            continue
-        nodes.append(
-            HydraulicNode(
-                node_id=f"{comp.name}.{port_number}",
-                boundary=port.boundary,
-                is_hub=False,
-                component=comp.name,
-            )
-        )
-        valid_port_numbers.add(port_number)
-
-    edges: list[HydraulicEdge] = []
-    if 1 in valid_port_numbers and 2 in valid_port_numbers:
-        edge = comp.internal_edges[(1, 2)]
-        edges.append(
-            HydraulicEdge(
-                edge_id=f"{comp.name}.1.2",
-                origin_node_id=f"{comp.name}.1",
-                destination_node_id=f"{comp.name}.2",
-                length=0.0,
-                diameter=0.0,
-                role=InternalEdgeRole.JUNCTION,
-                resistance_override=edge.resistance_override,
-                component=comp.name,
-                is_external=False,
-            )
-        )
-
-    return nodes, edges
-
-
-# ---------------------------------------------------------------------------
 # JunctionData
 # ---------------------------------------------------------------------------
 
@@ -524,7 +454,7 @@ def compile_component(
             HydraulicNode(
                 node_id=node_id,
                 boundary=port.boundary,
-                is_hub=False,
+                is_hub=_is_hub_port(port, port_number, comp),
                 component=comp.name,
             )
         )
@@ -575,6 +505,5 @@ _COMPILERS: dict[
     ValveComponentData: compile_valve,
     FlowSourceData: compile_flow_source,
     PressureControlData: compile_pressure_control,
-    BackPressureRegulatorData: compile_bpr,
     JunctionData: compile_junction,
 }

@@ -300,8 +300,7 @@ def test_render_dashboard_html_escapes_metadata(workspace_tmp):
 def test_render_dashboard_html_handles_missing_optional_tables(workspace_tmp):
     db_path = workspace_tmp / "minimal.db"
     conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
+    conn.executescript("""
         CREATE TABLE meta (key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE node_pressure (
             time REAL NOT NULL,
@@ -316,8 +315,7 @@ def test_render_dashboard_html_handles_missing_optional_tables(workspace_tmp):
         INSERT INTO meta VALUES ('platform_name', 'minimal');
         INSERT INTO node_pressure VALUES (0.0, 'n0', 101325.0);
         INSERT INTO edge_flow VALUES (0.0, 'e0', 0.0);
-        """
-    )
+        """)
     conn.close()
 
     html = render_dashboard_html(db_path)
@@ -370,7 +368,8 @@ def _project(workspace_tmp: Path, graph: HydraulicGraph) -> ProjectState:
 def test_visualization_endpoint_requires_project(workspace_tmp):
     _set_server_state(workspace_tmp, project=None, db_path=None)
 
-    response = TestClient(app).get("/simulation/visualization")
+    with TestClient(app) as client:
+        response = client.get("/simulation/visualization")
 
     assert response.status_code == 404
 
@@ -383,7 +382,8 @@ def test_visualization_endpoint_requires_db(workspace_tmp):
         db_path=None,
     )
 
-    response = TestClient(app).get("/simulation/visualization")
+    with TestClient(app) as client:
+        response = client.get("/simulation/visualization")
 
     assert response.status_code == 404
 
@@ -399,7 +399,8 @@ def test_visualization_endpoint_rejects_db_without_snapshots(workspace_tmp):
         db_path=db_path,
     )
 
-    response = TestClient(app).get("/simulation/visualization")
+    with TestClient(app) as client:
+        response = client.get("/simulation/visualization")
 
     assert response.status_code == 409
 
@@ -414,7 +415,8 @@ def test_visualization_endpoint_writes_visualization_files(workspace_tmp):
         db_path=db_path,
     )
 
-    response = TestClient(app).get("/simulation/visualization")
+    with TestClient(app) as client:
+        response = client.get("/simulation/visualization")
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")
@@ -439,6 +441,7 @@ def test_visualization_endpoint_rejects_unreadable_db(workspace_tmp):
         db_path=db_path,
     )
 
-    response = TestClient(app).get("/simulation/visualization")
+    with TestClient(app) as client:
+        response = client.get("/simulation/visualization")
 
     assert response.status_code == 422

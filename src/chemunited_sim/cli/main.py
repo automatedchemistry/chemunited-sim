@@ -9,9 +9,9 @@ from pathlib import Path
 import uvicorn
 
 from ..worker.config import SimConfig
+from . import server as _server_module
 from .clock import SimClock
 from .server import SimStatus, SimulationState, _do_load_project, app
-from . import server as _server_module
 
 
 def main() -> None:
@@ -25,7 +25,7 @@ def main() -> None:
         type=Path,
         default=None,
         help="Path to a project folder or .chemunited ZIP. "
-             "If omitted the server starts in NO_PROJECT state.",
+        "If omitted the server starts in NO_PROJECT state.",
     )
     parser.add_argument(
         "--port",

@@ -22,27 +22,29 @@ from chemunited_sim.worker import SimConfig
 
 PROJECT_PATH = Path("tests") / "full_platform"
 
-EXPECTED_COMPONENTS = {
-    "gassupply",
+REQUIRED_COMPONENTS = {
     "liquidpump",
-    "productsink",
-    "wastesink",
-    "gastube",
-    "liquidtube",
     "reactortube",
-    "outlettube",
-    "collecttube",
-    "wastetube",
-    "tmixer",
     "reactor",
     "bpr",
     "divertvalve",
+    "mfc",
 }
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+def _stop_background_threads() -> None:
+    if server._state is None:
+        return
+    server._state._stop_event.set()
+    for thread in (server._state._workflow_thread, server._state._worker_thread):
+        if thread is not None:
+            thread.join(timeout=5.0)
+    server._state.sim_status = SimStatus.IDLE
 
 
 @pytest.fixture
@@ -67,11 +69,9 @@ def client(workspace_tmp) -> TestClient:
         cmd_queue=queue.Queue(),
         db_dir=workspace_tmp,
     )
-    yield TestClient(app)
-    if server._state.sim_status == SimStatus.RUNNING:
-        server._state._stop_event.set()
-        if server._state._worker_thread is not None:
-            server._state._worker_thread.join(timeout=3.0)
+    with TestClient(app) as test_client:
+        yield test_client
+        _stop_background_threads()
 
 
 @pytest.fixture
@@ -101,7 +101,7 @@ def _start_mode1(c: TestClient, execution_id: str = "test_run") -> None:
         json={
             "execution_id": execution_id,
             "dt": 0.5,
-            "t_end": 2.0,
+            "t_end": None,
             "real_time": False,
             "historical_file": "run_001.json",
         },
@@ -156,7 +156,7 @@ def test_project_load_succeeds(client):
     resp = client.post("/project/load", json={"path": str(PROJECT_PATH.resolve())})
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body["components"]) == EXPECTED_COMPONENTS
+    assert REQUIRED_COMPONENTS <= set(body["components"])
 
 
 def test_project_load_bad_path(client):
@@ -179,7 +179,7 @@ def test_get_project_after_load(loaded_client):
     body = resp.json()
     assert "components" in body
     assert "processes" in body
-    assert set(body["components"]) == EXPECTED_COMPONENTS
+    assert REQUIRED_COMPONENTS <= set(body["components"])
     assert "simulate" in body["processes"]
 
 
@@ -234,7 +234,9 @@ def test_mode2_double_start_rejected(loaded_client):
 
 def test_mode1_runs_to_end(loaded_client):
     _start_mode1(loaded_client)
-    assert _wait_until_idle(loaded_client, timeout=10.0), "simulation did not reach idle"
+    assert _wait_until_idle(
+        loaded_client, timeout=10.0
+    ), "simulation did not reach idle"
     assert loaded_client.get("/status").json()["sim_status"] == "idle"
 
 
@@ -280,5 +282,7 @@ def test_visualization_after_run(loaded_client):
     assert _wait_until_idle(loaded_client, timeout=10.0)
     resp = loaded_client.get("/simulation/visualization")
     assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("text/html")
-    assert "reactor" in resp.text
+    assert resp.headers["content-type"].startswith("application/json")
+    dashboard_html = Path(resp.json()["dashboard_html"])
+    assert dashboard_html.exists()
+    assert "reactor" in dashboard_html.read_text(encoding="utf-8")

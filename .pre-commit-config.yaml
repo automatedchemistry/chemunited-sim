@@ -16,3 +16,8 @@ repos:
         entry: mypy
         language: system
         pass_filenames: false
+      - id: pytest
+        name: pytest
+        entry: powershell.exe -NoProfile -Command ".\\.venv\\Scripts\\python.exe -m pytest"
+        language: system
+        pass_filenames: false

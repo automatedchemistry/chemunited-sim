@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from loguru import logger
-
 from chemunited_core.common.enums import ConnectionType, PhaseKind
 from chemunited_core.components import ComponentData, NeutralComponentData
 from chemunited_core.compounds import COMPOUNDS, ChemicalEntity
 from chemunited_core.connections.edge import EdgeData, EdgeMode
 from chemunited_core.figure_registry import COMPONENTS
+from loguru import logger
 
 from ..reactions import FirstOrderDecay, ReactionsMap
 
@@ -73,7 +72,9 @@ class PlatformBuilder:
         )
         edge = EdgeData.from_mode(mode)
         self._edges.append(edge)
-        logger.debug("Edge added | {}.{} -> {}.{}", origin, origin_port, destiny, destiny_port)
+        logger.debug(
+            "Edge added | {}.{} -> {}.{}", origin, origin_port, destiny, destiny_port
+        )
         return edge
 
     def add_compound(
@@ -108,7 +109,10 @@ class PlatformBuilder:
         delta_temperature_per_mol_converted: float = 0.0,
     ) -> None:
         if reaction_type != "FirstOrderDecay":
-            raise ValueError(f"Unknown reaction_type '{reaction_type}'. Only 'FirstOrderDecay' is supported.")
+            raise ValueError(
+                f"Unknown reaction_type '{reaction_type}'. "
+                "Only 'FirstOrderDecay' is supported."
+            )
         node_id = f"{target}.Inventory"
         phase_kind = PhaseKind(phase.lower()) if isinstance(phase, str) else phase
         reaction = FirstOrderDecay(
@@ -119,7 +123,13 @@ class PlatformBuilder:
             delta_temperature_per_mol_converted=delta_temperature_per_mol_converted,
         )
         self._reactions_map.setdefault(node_id, []).append(reaction)
-        logger.debug("Reaction added | target='{}' type='{}' reactant='{}' -> product='{}'", target, reaction_type, reactant, product)
+        logger.debug(
+            "Reaction added | target='{}' type='{}' reactant='{}' -> product='{}'",
+            target,
+            reaction_type,
+            reactant,
+            product,
+        )
 
     @property
     def reactions_map(self) -> ReactionsMap:

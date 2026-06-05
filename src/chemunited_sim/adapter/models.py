@@ -106,11 +106,8 @@ class HydraulicGraph:
                          time -- subsequent sync_internal_state() calls on
                          the source component do not affect these copies.
                          Used by the inventory module to seed InventoryState.
-        bpr_edges:       Edge IDs of all BPR-controlled edges. Pre-compiled
-                         index for the worker loop that toggles them each step.
     """
 
     nodes: dict[str, HydraulicNode] = field(default_factory=dict)
     edges: dict[str, HydraulicEdge] = field(default_factory=dict)
     inventory_nodes: dict[str, InventoryNode] = field(default_factory=dict)
-    bpr_edges: list[str] = field(default_factory=list)

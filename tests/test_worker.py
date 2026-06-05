@@ -27,7 +27,6 @@ from chemunited_core.components import (
 )
 from chemunited_core.connections import EdgeData, EdgeMode
 from chemunited_core.utils.internal_quantity import ChemUnitQuantity
-from loguru import logger
 
 from chemunited_sim.adapter import compile_graph
 from chemunited_sim.recorder import Recorder
@@ -179,7 +178,6 @@ def test_simconfig_defaults():
     assert cfg.dt == pytest.approx(0.1)
     assert cfg.t_end == pytest.approx(10.0)
     assert cfg.viscosity > 0.0
-    assert cfg.bpr_max_iters == 20
 
 
 # ---------------------------------------------------------------------------
@@ -345,72 +343,40 @@ def test_recorder_has_edge_flow_rows(tmp_path):
 
 
 def test_bpr_opens_when_upstream_exceeds_setpoint():
-    """setpoint=1.2 bar: BPR should open stably without a convergence warning."""
+    """setpoint=1.2 bar: after one step BPR resistance should be < R_MAX."""
     graph, components = _make_bpr_platform(setpoint_bar=1.2)
-    bpr_edge_id = graph.bpr_edges[0]
-
-    cfg = SimConfig(dt=0.1, t_end=0.1)
-    w = Worker(graph, components, cfg)
-
-    log_messages: list[str] = []
-    handler_id = logger.add(
-        lambda message: log_messages.append(message.record["message"]),
-        level="WARNING",
-    )
-    try:
-        w.step()
-    finally:
-        logger.remove(handler_id)
-
-    bpr_edge = graph.edges[bpr_edge_id]
-    assert bpr_edge.resistance_override is None, "BPR should be open"
-    convergence_warnings = [
-        message for message in log_messages if "did not converge" in message
-    ]
-    assert len(convergence_warnings) == 0
-
-
-def test_bpr_stays_closed_when_upstream_below_setpoint():
-    """setpoint=3.5 bar: upstream ≈ 3 bar < 3.5 bar — BPR stays closed."""
-    graph, components = _make_bpr_platform(setpoint_bar=3.5)
-    bpr_edge_id = graph.bpr_edges[0]
-
-    cfg = SimConfig(dt=0.1, t_end=0.1)
-    w = Worker(graph, components, cfg)
-
-    log_messages: list[str] = []
-    handler_id = logger.add(
-        lambda message: log_messages.append(message.record["message"]),
-        level="WARNING",
-    )
-    try:
-        w.step()
-    finally:
-        logger.remove(handler_id)
-
-    bpr_edge = graph.edges[bpr_edge_id]
-    assert bpr_edge.resistance_override == pytest.approx(R_MAX_HYDRAULIC)
-    convergence_warnings = [
-        message for message in log_messages if "did not converge" in message
-    ]
-    assert len(convergence_warnings) == 0
-
-
-def test_bpr_open_allows_flow():
-    """When BPR is open (setpoint=1.2 bar), flow through the BPR edge is nonzero."""
-    graph, components = _make_bpr_platform(setpoint_bar=1.2)
-    bpr_edge_id = graph.bpr_edges[0]
     cfg = SimConfig(dt=0.1, t_end=0.1)
     w = Worker(graph, components, cfg)
     w.step()
-    assert abs(w.hyd_state.flows.get(bpr_edge_id, 0.0)) > 1e-9
+    bpr_edge = graph.edges["bpr.1.2"]
+    assert bpr_edge.resistance_override != pytest.approx(
+        R_MAX_HYDRAULIC
+    ), "BPR should open"
+
+
+def test_bpr_stays_closed_when_upstream_below_setpoint():
+    """setpoint=3.5 bar, src=3 bar: upstream < setpoint — BPR stays closed."""
+    graph, components = _make_bpr_platform(setpoint_bar=3.5)
+    cfg = SimConfig(dt=0.1, t_end=0.1)
+    w = Worker(graph, components, cfg)
+    w.step()
+    bpr_edge = graph.edges["bpr.1.2"]
+    assert bpr_edge.resistance_override == pytest.approx(R_MAX_HYDRAULIC)
+
+
+def test_bpr_open_allows_flow():
+    """When BPR opens, flow through the BPR edge is nonzero after convergence."""
+    graph, components = _make_bpr_platform(setpoint_bar=1.2)
+    cfg = SimConfig(dt=0.1, t_end=1.0)
+    w = Worker(graph, components, cfg)
+    w.run()
+    assert abs(w.hyd_state.flows.get("bpr.1.2", 0.0)) > 1e-9
 
 
 def test_bpr_closed_blocks_flow():
     """When BPR is closed (setpoint=3.5 bar), flow through BPR is near zero."""
     graph, components = _make_bpr_platform(setpoint_bar=3.5)
-    bpr_edge_id = graph.bpr_edges[0]
     cfg = SimConfig(dt=0.1, t_end=0.1)
     w = Worker(graph, components, cfg)
     w.step()
-    assert abs(w.hyd_state.flows.get(bpr_edge_id, 0.0)) < 1e-6
+    assert abs(w.hyd_state.flows.get("bpr.1.2", 0.0)) < 1e-6

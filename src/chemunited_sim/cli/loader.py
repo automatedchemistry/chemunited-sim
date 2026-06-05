@@ -10,6 +10,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
+
 from chemunited_core.components import ComponentData
 from chemunited_core.compounds import COMPOUNDS
 from chemunited_workflow.process import Process
@@ -24,7 +25,7 @@ from .builder import PlatformBuilder
 class ProjectState:
     project_path: Path
     processes: dict[str, type[Process]]
-    configs: dict[str, type]   # process name → ProcessConfig class
+    configs: dict[str, type]  # process name → ProcessConfig class
     components: dict[str, ComponentData]
     graph: HydraulicGraph
     reactions_map: dict | None = None
@@ -96,7 +97,6 @@ def load_project(path: Path) -> ProjectState:
 
     # Import protocols/__init__.py and read PROCESSES
     # Ensure protocols/ dir is on sys.path so relative imports inside work
-    protocols_dir = project_dir / "protocols"
     protocols_parent = str(project_dir)
     if protocols_parent not in sys.path:
         sys.path.insert(0, protocols_parent)
@@ -120,7 +120,8 @@ def load_project(path: Path) -> ProjectState:
     setup_module.build_draw(builder)
     logger.info(
         "build_draw complete | components={} edges={}",
-        len(builder.components), len(builder.edges),
+        len(builder.components),
+        len(builder.edges),
     )
 
     logger.debug("Compiling hydraulic graph")
@@ -134,7 +135,9 @@ def load_project(path: Path) -> ProjectState:
     reactions_map = builder.reactions_map or None
     logger.info(
         "Project '{}' ready | {} component(s) | reactions_map={}",
-        project_dir.name, len(components), reactions_map is not None,
+        project_dir.name,
+        len(components),
+        reactions_map is not None,
     )
 
     return ProjectState(
@@ -196,6 +199,8 @@ def parse_historical_file(path: Path) -> tuple[dict, list[tuple[str, dict]]]:
     process_sequence = [(name, kwargs) for _, name, kwargs in entries]
     logger.info(
         "Historical file '{}' parsed | {} process step(s): {}",
-        path.name, len(process_sequence), [n for n, _ in process_sequence],
+        path.name,
+        len(process_sequence),
+        [n for n, _ in process_sequence],
     )
     return main_parameter, process_sequence

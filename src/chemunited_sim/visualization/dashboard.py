@@ -9,7 +9,7 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from .pyvis_export import NoSnapshotsError, SnapshotReadError
 
@@ -48,6 +48,17 @@ class TraceSpec:
             "defaultVisible": self.default_visible,
             "points": len(self.x),
         }
+
+
+class _RawTrace(TypedDict):
+    name: str
+    x: list[float]
+    y: list[float]
+    minimum: float | None
+    maximum: float | None
+    range: float
+    max_abs: float
+    flat: bool
 
 
 @dataclass(frozen=True)
@@ -119,8 +130,7 @@ def render_dashboard_html(db_path: str | os.PathLike) -> str:
 
 def _read_meta(conn: sqlite3.Connection) -> dict[str, str]:
     return {
-        row["key"]: row["value"]
-        for row in conn.execute("SELECT key, value FROM meta")
+        row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM meta")
     }
 
 
@@ -171,18 +181,14 @@ def _read_species_moles(conn: sqlite3.Connection) -> dict[str, dict[str, list]]:
     series: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
     if not _table_exists(conn, "inventory_content"):
         return {}
-    for row in conn.execute(
-        """
+    for row in conn.execute("""
         SELECT time, node_id, phase, species_id, moles
         FROM inventory_content
         WHERE species_id != '__carrier__'
         ORDER BY time
-        """
-    ):
+        """):
         key = f"{row['node_id']} / {row['phase']}"
-        series[key][row["species_id"]].append(
-            (float(row["time"]), float(row["moles"]))
-        )
+        series[key][row["species_id"]].append((float(row["time"]), float(row["moles"])))
     return {k: dict(v) for k, v in series.items()}
 
 
@@ -191,14 +197,12 @@ def _read_cell_temperatures(conn: sqlite3.Connection) -> dict[str, list]:
     series: dict[str, list] = defaultdict(list)
     if not _table_exists(conn, "cell_state"):
         return {}
-    for row in conn.execute(
-        """
+    for row in conn.execute("""
         SELECT time, edge_id, AVG(temperature) AS avg_temp
         FROM cell_state
         GROUP BY time, edge_id
         ORDER BY time
-        """
-    ):
+        """):
         if row["avg_temp"] is not None:
             series[row["edge_id"]].append((float(row["time"]), float(row["avg_temp"])))
     return dict(series)
@@ -907,7 +911,7 @@ def _make_line_chart(
     x_label: str,
     y_label: str,
 ) -> ChartSpec:
-    raw_traces = []
+    raw_traces: list[_RawTrace] = []
     for name, (xs, ys) in sorted(series.items()):
         y_values = [float(value) for value in ys]
         x_values = [_round_time(float(value)) for value in xs]

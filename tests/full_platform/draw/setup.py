@@ -33,10 +33,13 @@ def build_draw(platform) -> None:
         capacity="10 ml",
         top_access=2,
         bottom_access=1,
-        pressure_access=True
+        pressure_access=True,
     )
-    platform.add_component(name="bpr", figure="BackPressureRegulator", setpoint="1.2 bar")
+    platform.add_component(
+        name="bpr", figure="BackPressureRegulator", setpoint="1.2 bar"
+    )
     platform.add_component(name="divertvalve", figure="SolenoidValve2Way")
+    platform.add_component(name="mfc", figure="MFCComponent", setpoint="0.5 ml/min")
 
     platform["reactor"].internal_inventory.liq_content = VolumeContentBase(
         phase_kind="LIQUID",
@@ -55,8 +58,11 @@ def build_draw(platform) -> None:
     )
 
     # ── Connections ────────────────────────────────────────────────────────────
-    platform.add_connection("gassupply", "tmixer", 1, 1, length="14 cm", diameter="1.5 mm")
-    platform.add_connection("liquidpump", "tmixer", 1, 2, length="14 cm", diameter="1.5 mm")
+    platform.add_connection("gassupply", "mfc", 1, 1, length="7 cm", diameter="1.5 mm")
+    platform.add_connection("mfc", "tmixer", 2, 1, length="7 cm", diameter="1.5 mm")
+    platform.add_connection(
+        "liquidpump", "tmixer", 1, 2, length="14 cm", diameter="1.5 mm"
+    )
     platform.add_connection(
         "tmixer", "reactortube", 3, 1, length="2 cm", diameter="2 mm"
     )
@@ -64,13 +70,20 @@ def build_draw(platform) -> None:
         "reactortube", "reactor", 2, 2, length="2 cm", diameter="2 mm"
     )
     platform.add_connection("reactor", "bpr", 1, 1, length="2 cm", diameter="1.5 mm")
-    platform.add_connection("bpr", "divertvalve", 2, 0, length="24 cm", diameter="1.5 mm")
-    platform.add_connection("divertvalve", "productsink", 1, 1, length="14 cm", diameter="1.5 mm")
-    platform.add_connection("divertvalve", "wastesink", 2, 1, length="14 cm", diameter="1.5 mm")
+    platform.add_connection(
+        "bpr", "divertvalve", 2, 0, length="24 cm", diameter="1.5 mm"
+    )
+    platform.add_connection(
+        "divertvalve", "productsink", 1, 1, length="14 cm", diameter="1.5 mm"
+    )
+    platform.add_connection(
+        "divertvalve", "wastesink", 2, 1, length="14 cm", diameter="1.5 mm"
+    )
 
     # ── Reactions ──────────────────────────────────────────────────────────────
     platform.add_reaction(
-        "reactor", "FirstOrderDecay",
+        "reactor",
+        "FirstOrderDecay",
         reactant="reagent_a",
         product="product_b",
         rate_constant=0.3,
