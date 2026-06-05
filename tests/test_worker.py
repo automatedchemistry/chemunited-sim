@@ -13,7 +13,6 @@ Covers:
 from __future__ import annotations
 
 import sqlite3
-import warnings
 
 import pytest
 from chemunited_core.common.constant import R_MAX_HYDRAULIC
@@ -28,6 +27,7 @@ from chemunited_core.components import (
 )
 from chemunited_core.connections import EdgeData, EdgeMode
 from chemunited_core.utils.internal_quantity import ChemUnitQuantity
+from loguru import logger
 
 from chemunited_sim.adapter import compile_graph
 from chemunited_sim.recorder import Recorder
@@ -352,13 +352,21 @@ def test_bpr_opens_when_upstream_exceeds_setpoint():
     cfg = SimConfig(dt=0.1, t_end=0.1)
     w = Worker(graph, components, cfg)
 
-    with warnings.catch_warnings(record=True) as w_list:
-        warnings.simplefilter("always")
+    log_messages: list[str] = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(message.record["message"]),
+        level="WARNING",
+    )
+    try:
         w.step()
+    finally:
+        logger.remove(handler_id)
 
     bpr_edge = graph.edges[bpr_edge_id]
     assert bpr_edge.resistance_override is None, "BPR should be open"
-    convergence_warnings = [x for x in w_list if "did not converge" in str(x.message)]
+    convergence_warnings = [
+        message for message in log_messages if "did not converge" in message
+    ]
     assert len(convergence_warnings) == 0
 
 
@@ -370,13 +378,21 @@ def test_bpr_stays_closed_when_upstream_below_setpoint():
     cfg = SimConfig(dt=0.1, t_end=0.1)
     w = Worker(graph, components, cfg)
 
-    with warnings.catch_warnings(record=True) as w_list:
-        warnings.simplefilter("always")
+    log_messages: list[str] = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(message.record["message"]),
+        level="WARNING",
+    )
+    try:
         w.step()
+    finally:
+        logger.remove(handler_id)
 
     bpr_edge = graph.edges[bpr_edge_id]
     assert bpr_edge.resistance_override == pytest.approx(R_MAX_HYDRAULIC)
-    convergence_warnings = [x for x in w_list if "did not converge" in str(x.message)]
+    convergence_warnings = [
+        message for message in log_messages if "did not converge" in message
+    ]
     assert len(convergence_warnings) == 0
 
 

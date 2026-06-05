@@ -59,8 +59,10 @@ class SimulationState:
     clock: SimClock
     cmd_queue: queue.Queue
     db_dir: Path
+    log_path: Path | None = None
     _worker_thread: Thread | None = field(default=None, repr=False)
     _workflow_thread: Thread | None = field(default=None, repr=False)
+    _log_sink_id: int | None = field(default=None, repr=False)
     _stop_event: Event = field(default_factory=Event, repr=False)
     _workflow_done: Event = field(default_factory=Event, repr=False)
 
@@ -73,6 +75,32 @@ def get_state() -> SimulationState:
     if _state is None:
         raise RuntimeError("SimulationState not initialised")
     return _state
+
+
+def _run_log_path(db_path: Path) -> Path:
+    return db_path.with_name(f"{db_path.stem}_log.log")
+
+
+def _detach_run_log(state: SimulationState) -> None:
+    if state._log_sink_id is None:
+        return
+    logger.remove(state._log_sink_id)
+    state._log_sink_id = None
+
+
+def _attach_run_log(state: SimulationState, db_path: Path) -> None:
+    _detach_run_log(state)
+    log_path = _run_log_path(db_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    state._log_sink_id = logger.add(
+        log_path,
+        mode="w",
+        encoding="utf-8",
+        level="DEBUG",
+        backtrace=True,
+        diagnose=False,
+    )
+    state.log_path = log_path
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +208,7 @@ def _worker_thread_fn(
         if state.sim_status == SimStatus.RUNNING:
             logger.info("Worker thread exiting — marking simulation idle")
             state.sim_status = SimStatus.IDLE
+        _detach_run_log(state)
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +506,7 @@ def post_simulation_start(req: StartSimRequest) -> dict:
         state._workflow_done.set()
         state._workflow_thread = None
 
+    _attach_run_log(state, db_path)
     mode = "mode 2 (real-time)" if req.real_time else "mode 1 (workflow)"
     logger.info(
         "Starting simulation | {} | execution_id={} dt={} t_end={} db={}",

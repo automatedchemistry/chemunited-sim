@@ -9,11 +9,11 @@ correct inflow end, ready for the next call to :func:`advance`.
 
 from __future__ import annotations
 
-import warnings
 from collections import defaultdict, deque
 
 from chemunited_core.common.constant import R_MAX_HYDRAULIC
 from chemunited_core.components.enums import InternalEdgeRole
+from loguru import logger
 
 from ..adapter.models import HydraulicEdge, HydraulicGraph
 from ..common.constant import MAX_JUNCTION_HOPS, MIN_POCKET_VOLUME
@@ -177,11 +177,10 @@ def _route_pocket(
             return
         current = next_node
 
-    warnings.warn(
-        f"Pocket routing exceeded {MAX_JUNCTION_HOPS} JUNCTION hops from node "
-        f"'{node_id}' — pocket discarded.",
-        UserWarning,
-        stacklevel=4,
+    logger.warning(
+        "Pocket routing exceeded {} JUNCTION hops from node '{}' - pocket discarded.",
+        MAX_JUNCTION_HOPS,
+        node_id,
     )
 
 

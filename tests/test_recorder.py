@@ -18,6 +18,7 @@ from collections import deque
 import pytest
 from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components.enums import InternalEdgeRole
+from loguru import logger
 
 from chemunited_sim.adapter.models import HydraulicEdge, HydraulicGraph, HydraulicNode
 from chemunited_sim.hydraulics.models import HydraulicState
@@ -200,13 +201,21 @@ class TestShouldRecord:
 
     def test_warns_on_non_multiple_interval(self, tmp_path):
         graph = _simple_graph()
-        with pytest.warns(UserWarning, match="not an exact multiple"):
+        log_messages: list[str] = []
+        handler_id = logger.add(
+            lambda message: log_messages.append(message.record["message"]),
+            level="WARNING",
+        )
+        try:
             Recorder(
                 db_path=tmp_path / "warn.db",
                 graph=graph,
                 dt=0.1,
                 record_interval=0.35,
             )
+        finally:
+            logger.remove(handler_id)
+        assert any("not an exact multiple" in message for message in log_messages)
 
     def teardown_method(self, method):
         pass  # pytest tmp_path handles cleanup

@@ -14,7 +14,6 @@ Filtering rules applied in every compiler
 
 from __future__ import annotations
 
-import warnings
 from typing import Callable
 
 from chemunited_core.common.enums import ConnectionType
@@ -30,6 +29,7 @@ from chemunited_core.components import (
 )
 from chemunited_core.components.enums import InternalEdgeRole, PortClosure
 from chemunited_core.figure_registry.pipes import SinkData
+from loguru import logger
 
 from .models import HydraulicEdge, HydraulicNode
 
@@ -262,8 +262,8 @@ def compile_flow_source(
     """Compile a flow source into a single boundary node with no internal edges.
 
     A flow source has only one hydraulic port (port 1).  If that port is
-    CAPPED, a ``UserWarning`` is emitted because a capped flow source can
-    never inject flow into the network.
+    CAPPED, a warning is logged because a capped flow source can never inject
+    flow into the network.
 
     Parameters
     ----------
@@ -282,11 +282,10 @@ def compile_flow_source(
         return nodes, []
 
     if not _is_hydraulic_active(port):
-        warnings.warn(
-            f"compile_flow_source: component '{comp.name}' port 1 is CAPPED — "
+        logger.warning(
+            "compile_flow_source: component '{}' port 1 is CAPPED - "
             "this flow source is degenerate and will have no effect on the network.",
-            UserWarning,
-            stacklevel=2,
+            comp.name,
         )
         return nodes, []
 

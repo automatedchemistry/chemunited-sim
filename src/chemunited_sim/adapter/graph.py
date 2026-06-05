@@ -9,13 +9,13 @@ simulation kernel.
 from __future__ import annotations
 
 import copy
-import warnings
 
 from chemunited_core.common.enums import ConnectionType
 from chemunited_core.components import BackPressureRegulatorData, ComponentData
 from chemunited_core.components.enums import InternalEdgeRole
 from chemunited_core.components.internals import InventoryNode
 from chemunited_core.connections.edge import EdgeData
+from loguru import logger
 
 from .compilers import _COMPILERS, compile_component
 from .models import HydraulicEdge, HydraulicGraph, HydraulicNode
@@ -52,7 +52,7 @@ def compile_graph(
        BPR edge IDs.
 
     2. **External-edge pass** — iterates ``EdgeData`` connections, skips
-       non-HYDRAULIC edges silently, emits ``UserWarning`` for edges whose
+       non-HYDRAULIC edges silently, logs warnings for edges whose
        endpoint nodes are absent (e.g. CAPPED ports), and inserts
        ``TRANSPORT`` edges with geometry taken from ``EdgeData``.
 
@@ -66,8 +66,8 @@ def compile_graph(
         Component names must be unique; a ``ValueError`` is raised otherwise.
     edges:
         All directed connections between component ports.  Non-hydraulic edges
-        are silently ignored.  Edges whose endpoint nodes are missing emit a
-        ``UserWarning`` and are skipped.
+        are silently ignored.  Edges whose endpoint nodes are missing log a
+        warning and are skipped.
 
     Returns
     -------
@@ -132,21 +132,19 @@ def compile_graph(
         dest_node_id = f"{edge_data.destination}.{edge_data.destination_port}"
 
         if origin_node_id not in all_nodes:
-            warnings.warn(
-                f"compile_graph: skipping edge '{edge_data.name}' — "
-                f"origin node '{origin_node_id}' not in graph "
-                f"(port may be CAPPED or component missing).",
-                UserWarning,
-                stacklevel=2,
+            logger.warning(
+                "compile_graph: skipping edge '{}' - origin node '{}' not in graph "
+                "(port may be CAPPED or component missing).",
+                edge_data.name,
+                origin_node_id,
             )
             continue
         if dest_node_id not in all_nodes:
-            warnings.warn(
-                f"compile_graph: skipping edge '{edge_data.name}' — "
-                f"destination node '{dest_node_id}' not in graph "
-                f"(port may be CAPPED or component missing).",
-                UserWarning,
-                stacklevel=2,
+            logger.warning(
+                "compile_graph: skipping edge '{}' - destination node '{}' not in graph "
+                "(port may be CAPPED or component missing).",
+                edge_data.name,
+                dest_node_id,
             )
             continue
 

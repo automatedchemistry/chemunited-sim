@@ -107,6 +107,7 @@ def _start_mode1(c: TestClient, execution_id: str = "test_run") -> None:
         },
     )
     assert resp.status_code == 200
+    return resp
 
 
 def _start_mode2(c: TestClient, execution_id: str = "test_run_rt") -> None:
@@ -120,6 +121,7 @@ def _start_mode2(c: TestClient, execution_id: str = "test_run_rt") -> None:
         },
     )
     assert resp.status_code == 200
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +213,9 @@ def test_db_before_run(loaded_client):
 
 
 def test_mode2_start_and_stop(loaded_client):
-    _start_mode2(loaded_client)
+    resp = _start_mode2(loaded_client)
+    db_path = Path(resp.json()["db_path"])
+    assert db_path.with_name(f"{db_path.stem}_log.log").exists()
     assert loaded_client.get("/status").json()["sim_status"] == "running"
     resp = loaded_client.post("/simulation/stop")
     assert resp.status_code == 200

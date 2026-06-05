@@ -12,11 +12,11 @@ from __future__ import annotations
 import math
 import os
 import sqlite3
-import warnings
 from collections import defaultdict
 from datetime import datetime, timezone
 
 from chemunited_core.common.enums import PhaseKind
+from loguru import logger
 
 from ..adapter.models import HydraulicGraph
 from ..common.constant import RECORDER_CELL_LENGTH_M, RECORDER_INTERVAL_DEFAULT
@@ -75,8 +75,8 @@ class Recorder:
         Simulation time step in seconds.
     record_interval:
         How often (in simulation seconds) to write a snapshot.
-        Must be a positive multiple of *dt*.  A ``UserWarning`` is emitted
-        if it is not an exact multiple.
+        Must be a positive multiple of *dt*.  A warning is logged if it is not
+        an exact multiple.
     platform_name:
         Human-readable platform identifier stored in the ``meta`` table.
     cell_length_m:
@@ -101,12 +101,12 @@ class Recorder:
         raw_ticks = record_interval / dt
         self._interval_ticks: int = round(raw_ticks)
         if abs(raw_ticks - self._interval_ticks) > 0.01:
-            warnings.warn(
-                f"Recorder: record_interval={record_interval} is not an exact "
-                f"multiple of dt={dt}.  Actual interval rounded to "
-                f"{self._interval_ticks * dt:.6f} s.",
-                UserWarning,
-                stacklevel=2,
+            logger.warning(
+                "Recorder: record_interval={} is not an exact multiple of dt={}. "
+                "Actual interval rounded to {:.6f} s.",
+                record_interval,
+                dt,
+                self._interval_ticks * dt,
             )
 
         # Build cell definitions (once)

@@ -9,10 +9,9 @@ transport edge, using the port-access mapping to select the correct phase.
 
 from __future__ import annotations
 
-import warnings
-
 from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components.enums import PortAccess
+from loguru import logger
 
 from ..common.constant import MIN_POCKET_VOLUME
 from ..hydraulics.models import HydraulicState
@@ -132,9 +131,9 @@ def emit(
 
     **Phase availability**: the vessel-is-always-full principle means phase
     runout should not occur in a correctly configured network.  If it does
-    (e.g. a vessel starts all-gas and liquid is requested), a ``UserWarning``
-    is emitted and the pocket is capped at the available volume.  Pockets
-    below ``MIN_POCKET_VOLUME`` are not emitted.
+    (e.g. a vessel starts all-gas and liquid is requested), a warning is
+    logged and the pocket is capped at the available volume.  Pockets below
+    ``MIN_POCKET_VOLUME`` are not emitted.
 
     Parameters
     ----------
@@ -180,13 +179,14 @@ def emit(
             continue  # phase is fully absent — nothing to emit
 
         if available < dV:
-            warnings.warn(
-                f"emit: inventory node '{entry.inv_node_id}' phase "
-                f"{'GAS' if entry.access == PortAccess.TOP else 'LIQUID'} "
-                f"available={available:.3e} m³ < requested dV={dV:.3e} m³ — "
-                "emitting available volume only.  Check vessel initial conditions.",
-                UserWarning,
-                stacklevel=2,
+            logger.warning(
+                "emit: inventory node '{}' phase {} available={:.3e} m^3 < "
+                "requested dV={:.3e} m^3 - emitting available volume only. "
+                "Check vessel initial conditions.",
+                entry.inv_node_id,
+                "GAS" if entry.access == PortAccess.TOP else "LIQUID",
+                available,
+                dV,
             )
             emit_vol = available
         else:

@@ -24,7 +24,7 @@ class SimConfig:
     bpr_max_iters:
         Maximum number of hydraulic solve iterations per step to stabilise
         the active BPR edge set.  Convergence is typically reached in 2–3
-        iterations.  A :class:`UserWarning` is emitted if the limit is hit.
+        iterations.  A warning is logged if the limit is hit.
     """
 
     dt: float = 0.1

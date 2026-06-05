@@ -16,11 +16,11 @@ Operator-splitting order (CLAUDE.md):
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 
 from chemunited_core.common.constant import R_MAX_HYDRAULIC
 from chemunited_core.components import ComponentData
+from loguru import logger
 
 from ..adapter.models import HydraulicEdge, HydraulicGraph
 from ..hydraulics.models import HydraulicState
@@ -96,7 +96,7 @@ class Worker:
 
     **BPR stabilisation**: before each step the hydraulic solve is iterated
     until the set of open BPR edges no longer changes (converges in O(1)
-    iterations for well-posed networks).  A :class:`UserWarning` is emitted if
+    iterations for well-posed networks).  A warning is logged if
     ``config.bpr_max_iters`` is exhausted without convergence.
 
     Parameters
@@ -238,7 +238,7 @@ class Worker:
         If there are no BPR edges the solver is called exactly once.
         Otherwise, solves, toggles BPR edges that changed state, and
         repeats until the edge set is stable or ``bpr_max_iters`` is reached.
-        A :class:`UserWarning` is emitted when the iteration limit is hit.
+        A warning is logged when the iteration limit is hit.
         """
         if not self._bpr_entries:
             return solve(self._graph, self._config.viscosity)
@@ -259,11 +259,10 @@ class Worker:
             if not changed:
                 return hyd_state
 
-        warnings.warn(
-            f"Worker._solve_stable: BPR edge set did not converge after "
-            f"{self._config.bpr_max_iters} iterations at t={self._t:.6f} s.  "
-            "Check network configuration.",
-            UserWarning,
-            stacklevel=3,
+        logger.warning(
+            "Worker._solve_stable: BPR edge set did not converge after "
+            "{} iterations at t={:.6f} s. Check network configuration.",
+            self._config.bpr_max_iters,
+            self._t,
         )
         return solve(self._graph, self._config.viscosity)
