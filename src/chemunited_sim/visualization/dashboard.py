@@ -105,6 +105,7 @@ def render_dashboard_html(db_path: str | os.PathLike) -> str:
         inv_states = _read_inventory_states(conn)
         species_moles = _read_species_moles(conn)
         cell_temps = _read_cell_temperatures(conn)
+        cell_profiles = _read_cell_profiles(conn)
     except NoSnapshotsError:
         raise
     except sqlite3.Error as exc:
@@ -120,6 +121,7 @@ def render_dashboard_html(db_path: str | os.PathLike) -> str:
         inv_states,
         species_moles,
         cell_temps,
+        cell_profiles,
     )
 
 
@@ -208,6 +210,173 @@ def _read_cell_temperatures(conn: sqlite3.Connection) -> dict[str, list]:
     return dict(series)
 
 
+def _read_cell_profiles(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return spatial pipe-cell profiles grouped by edge and snapshot time."""
+    has_state = _table_exists(conn, "cell_state")
+    has_content = _table_exists(conn, "cell_content")
+    if not has_state and not has_content:
+        return {"times": [], "edges": []}
+
+    geometry = _read_cell_geometry(conn)
+    cell_indices: dict[str, set[int]] = defaultdict(set)
+    phases: dict[str, set[str]] = defaultdict(set)
+    species: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    edge_times: dict[str, set[str]] = defaultdict(set)
+    times_by_key: dict[str, float] = {}
+    state_values: dict[tuple[str, str, str, int], tuple[float, float]] = {}
+    content_values: dict[tuple[str, str, str, str, int], float] = {}
+
+    if has_state:
+        for row in conn.execute("""
+            SELECT time, edge_id, cell_index, phase, phase_fraction, temperature
+            FROM cell_state
+            ORDER BY time, edge_id, cell_index, phase
+            """):
+            time_value = _round_time(float(row["time"]))
+            time_key = _time_key(time_value)
+            edge_id = str(row["edge_id"])
+            phase = str(row["phase"])
+            cell_index = int(row["cell_index"])
+            times_by_key[time_key] = time_value
+            edge_times[edge_id].add(time_key)
+            cell_indices[edge_id].add(cell_index)
+            phases[edge_id].add(phase)
+            state_values[(edge_id, time_key, phase, cell_index)] = (
+                float(row["phase_fraction"]),
+                float(row["temperature"]),
+            )
+
+    if has_content:
+        for row in conn.execute("""
+            SELECT time, edge_id, cell_index, phase, species_id, moles
+            FROM cell_content
+            ORDER BY time, edge_id, cell_index, phase, species_id
+            """):
+            time_value = _round_time(float(row["time"]))
+            time_key = _time_key(time_value)
+            edge_id = str(row["edge_id"])
+            phase = str(row["phase"])
+            species_id = str(row["species_id"])
+            cell_index = int(row["cell_index"])
+            times_by_key[time_key] = time_value
+            edge_times[edge_id].add(time_key)
+            cell_indices[edge_id].add(cell_index)
+            phases[edge_id].add(phase)
+            species[edge_id].add((phase, species_id))
+            content_values[(edge_id, time_key, phase, species_id, cell_index)] = float(
+                row["moles"]
+            )
+
+    time_payload = [
+        {"key": key, "value": value, "label": f"{_format_number(value)} s"}
+        for key, value in sorted(times_by_key.items(), key=lambda item: item[1])
+    ]
+    ordered_time_keys = [item["key"] for item in time_payload]
+    dynamic_edges = set(cell_indices) | set(edge_times)
+    edges = []
+
+    for edge_id in sorted(dynamic_edges):
+        cells = geometry.get(edge_id)
+        if not cells:
+            cells = [
+                {
+                    "index": index,
+                    "position": float(index),
+                    "center": float(index),
+                    "length": 1.0,
+                }
+                for index in sorted(cell_indices[edge_id])
+            ]
+        cell_order = [int(cell["index"]) for cell in cells]
+        edge_phases = sorted(phases[edge_id])
+        edge_species = [
+            {
+                "key": _content_trace_key(phase, species_id),
+                "phase": phase,
+                "speciesId": species_id,
+                "name": f"{phase} / {species_id}",
+            }
+            for phase, species_id in sorted(species[edge_id])
+        ]
+        snapshots = {}
+        for time_key in ordered_time_keys:
+            if time_key not in edge_times[edge_id]:
+                continue
+            phase_fractions = {}
+            temperatures = {}
+            for phase in edge_phases:
+                phase_fractions[phase] = []
+                temperatures[phase] = []
+                for cell_index in cell_order:
+                    values = state_values.get((edge_id, time_key, phase, cell_index))
+                    if values is None:
+                        phase_fractions[phase].append(0.0)
+                        temperatures[phase].append(None)
+                    else:
+                        phase_fraction, temperature = values
+                        phase_fractions[phase].append(phase_fraction)
+                        temperatures[phase].append(temperature)
+
+            contents = {}
+            for item in edge_species:
+                phase = item["phase"]
+                species_id = item["speciesId"]
+                contents[item["key"]] = [
+                    content_values.get(
+                        (edge_id, time_key, phase, species_id, cell_index),
+                        0.0,
+                    )
+                    for cell_index in cell_order
+                ]
+
+            snapshots[time_key] = {
+                "phaseFractions": phase_fractions,
+                "temperatures": temperatures,
+                "contents": contents,
+            }
+
+        edges.append(
+            {
+                "edgeId": edge_id,
+                "cellCount": len(cells),
+                "xLabel": (
+                    "Cell position (m)"
+                    if edge_id in geometry
+                    else "Cell index"
+                ),
+                "cells": cells,
+                "phases": edge_phases,
+                "species": edge_species,
+                "snapshots": snapshots,
+            }
+        )
+
+    return {"times": time_payload, "edges": edges}
+
+
+def _read_cell_geometry(conn: sqlite3.Connection) -> dict[str, list[dict[str, float]]]:
+    """Return cell geometry payloads keyed by edge id."""
+    if not _table_exists(conn, "edge_cells"):
+        return {}
+    geometry: dict[str, list[dict[str, float]]] = defaultdict(list)
+    for row in conn.execute("""
+        SELECT edge_id, cell_index, position_m, length_m
+        FROM edge_cells
+        ORDER BY edge_id, cell_index
+        """):
+        position = float(row["position_m"])
+        length = float(row["length_m"])
+        geometry[str(row["edge_id"])].append(
+            {
+                "index": int(row["cell_index"]),
+                "position": position,
+                "center": position + 0.5 * length,
+                "length": length,
+            }
+        )
+    return dict(geometry)
+
+
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -229,6 +398,7 @@ def _build_html(
     inv_states: dict[str, list],
     species_moles: dict[str, dict[str, list]],
     cell_temps: dict[str, list],
+    cell_profiles: dict[str, Any],
 ) -> str:
     charts = _build_charts(
         node_pressures=node_pressures,
@@ -243,18 +413,28 @@ def _build_html(
         inv_states=inv_states,
         species_moles=species_moles,
         cell_temps=cell_temps,
+        cell_profiles=cell_profiles,
     )
     payload = {
         "stem": stem,
         "summary": summary,
-        "tabs": ["pressures", "flows", "inventories", "species", "temperatures"],
+        "tabs": [
+            "pressures",
+            "flows",
+            "inventories",
+            "species",
+            "temperatures",
+            "cells",
+        ],
         "charts": [chart.to_payload() for chart in charts],
+        "cellProfiles": cell_profiles,
         "emptyStates": {
             "pressures": "No node pressure traces were recorded.",
             "flows": "No edge flow traces were recorded.",
             "inventories": "No inventory state traces were recorded.",
             "species": "No tracked inventory species were recorded.",
             "temperatures": "No edge cell temperature traces were recorded.",
+            "cells": "No pipe-cell state or content rows were recorded.",
         },
     }
 
@@ -388,7 +568,7 @@ def _build_html(
     flex-wrap: wrap;
     margin-bottom: 14px;
   }}
-  .search-input {{
+  .search-input, .select-input {{
     min-width: 260px;
     flex: 1;
     border: 1px solid #cbd4df;
@@ -398,6 +578,7 @@ def _build_html(
     font-size: 0.9rem;
     padding: 9px 11px;
   }}
+  .select-input {{ flex: 0 1 220px; }}
   .checkbox-label {{
     align-items: center;
     color: #3d4856;
@@ -426,6 +607,18 @@ def _build_html(
     margin-bottom: 8px;
   }}
   .plotly-chart {{ width: 100%; height: 380px; }}
+  .profile-plots {{
+    display: grid;
+    gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  }}
+  .cell-plot-title {{
+    color: #3d4856;
+    font-size: 0.86rem;
+    font-weight: 700;
+    margin: 4px 0 6px;
+  }}
+  .cell-profile-chart {{ height: 320px; }}
   .trace-list {{
     border-top: 1px solid #edf0f3;
     display: grid;
@@ -481,7 +674,9 @@ def _build_html(
     .time-range {{ white-space: normal; }}
     .overview-grid {{ grid-template-columns: 1fr; }}
     .plotly-chart {{ height: 330px; }}
+    .cell-profile-chart {{ height: 300px; }}
     .search-input {{ min-width: 100%; }}
+    .select-input {{ min-width: 100%; }}
   }}
 </style>
 </head>
@@ -508,6 +703,7 @@ def _build_html(
     <button class="tab-button" data-tab="inventories">Inventories</button>
     <button class="tab-button" data-tab="species">Species</button>
     <button class="tab-button" data-tab="temperatures">Temperatures</button>
+    <button class="tab-button" data-tab="cells">Pipe Cells</button>
   </nav>
 
   <section class="tab-panel active" data-panel="overview">
@@ -532,20 +728,27 @@ def _build_html(
   {_render_chart_tab("inventories", "Search inventory traces")}
   {_render_chart_tab("species", "Search species traces")}
   {_render_chart_tab("temperatures", "Search temperature traces")}
+  {_render_cell_tab()}
 </main>
 <script id="dashboard-data" type="application/json">{payload_json}</script>
 <script>
 (() => {{
   const payload = JSON.parse(document.getElementById("dashboard-data").textContent);
-  const tabs = ["pressures", "flows", "inventories", "species", "temperatures"];
+  const chartTabs = ["pressures", "flows", "inventories", "species", "temperatures"];
+  const tabs = [...chartTabs, "cells"];
+  const cellProfiles = payload.cellProfiles || {{ times: [], edges: [] }};
+  const cellTimes = cellProfiles.times || [];
   const colorway = [
     "#0b5cad", "#b33f62", "#2f855a", "#b7791f", "#5a4fcf",
     "#0f766e", "#c2410c", "#4a5568", "#7c3aed", "#0369a1"
   ];
+  const latestCellTime = cellTimes.length ? cellTimes[cellTimes.length - 1].key : "";
   const state = {{
     activeTab: "overview",
-    query: Object.fromEntries(tabs.map((tab) => [tab, ""])),
-    showFlat: Object.fromEntries(tabs.map((tab) => [tab, false])),
+    query: Object.fromEntries(chartTabs.map((tab) => [tab, ""])),
+    showFlat: Object.fromEntries(chartTabs.map((tab) => [tab, false])),
+    cellQuery: "",
+    cellTimeKey: latestCellTime,
     visibility: {{}}
   }};
 
@@ -574,7 +777,11 @@ def _build_html(
     document.querySelectorAll(".tab-panel").forEach((panel) => {{
       panel.classList.toggle("active", panel.dataset.panel === tab);
     }});
-    if (tab !== "overview") renderTab(tab);
+    if (tab === "cells") {{
+      renderCells();
+    }} else if (tab !== "overview") {{
+      renderTab(tab);
+    }}
   }}
 
   function formatNumber(value) {{
@@ -722,6 +929,274 @@ def _build_html(
     Plotly.react(plotId, plotTraces, layout, config);
   }}
 
+  function populateCellTimeSelect() {{
+    const select = document.querySelector("[data-cell-time]");
+    select.innerHTML = "";
+    if (!cellTimes.length) {{
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No snapshots";
+      select.appendChild(option);
+      select.disabled = true;
+      return;
+    }}
+    select.disabled = false;
+    cellTimes.forEach((time) => {{
+      const option = document.createElement("option");
+      option.value = time.key;
+      option.textContent = time.label;
+      select.appendChild(option);
+    }});
+    select.value = state.cellTimeKey;
+  }}
+
+  function renderCells() {{
+    const container = document.getElementById("cell-profiles");
+    const summary = document.getElementById("cell-profile-summary");
+    container.innerHTML = "";
+
+    if (!cellTimes.length || !cellProfiles.edges.length) {{
+      summary.textContent = "";
+      container.appendChild(emptyState(payload.emptyStates.cells));
+      return;
+    }}
+
+    const selected = cellTimes.find((time) => time.key === state.cellTimeKey) ||
+      cellTimes[cellTimes.length - 1];
+    state.cellTimeKey = selected.key;
+    const query = state.cellQuery.trim().toLowerCase();
+    const edges = cellProfiles.edges.filter((edge) =>
+      edge.snapshots[selected.key] && matchesCellEdge(edge, query)
+    );
+
+    summary.textContent =
+      `${{edges.length}} edge(s), ${{cellProfiles.edges.length}} total, ` +
+      `t=${{selected.label}}`;
+    if (!edges.length) {{
+      container.appendChild(emptyState("No pipe-cell profiles match this filter."));
+      return;
+    }}
+    edges.forEach((edge, index) =>
+      renderCellEdge(container, edge, selected.key, index)
+    );
+  }}
+
+  function matchesCellEdge(edge, query) {{
+    if (!query) return true;
+    const haystack = [
+      edge.edgeId,
+      ...(edge.phases || []),
+      ...(edge.species || []).map((item) => item.name)
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  }}
+
+  function renderCellEdge(container, edge, timeKey, index) {{
+    const snapshot = edge.snapshots[timeKey];
+    const card = document.createElement("article");
+    card.className = "chart-card";
+    const statePlotId = `cell-state-${{index}}`;
+    const contentPlotId = `cell-content-${{index}}`;
+    const phaseLabel = `${{edge.phases.length}} phase` +
+      (edge.phases.length === 1 ? "" : "s");
+    const speciesLabel = `${{edge.species.length}} species trace` +
+      (edge.species.length === 1 ? "" : "s");
+
+    card.innerHTML = `
+      <div class="chart-head">
+        <div>
+          <h2>${{escapeHtml(edge.edgeId)}}</h2>
+          <div class="chart-meta">
+            ${{edge.cellCount}} cells, ${{phaseLabel}}, ${{speciesLabel}}
+          </div>
+        </div>
+      </div>
+      <div class="profile-plots">
+        <div class="cell-plot">
+          <div class="cell-plot-title">Cell state</div>
+          <div id="${{statePlotId}}" class="plotly-chart cell-profile-chart"></div>
+        </div>
+        <div class="cell-plot">
+          <div class="cell-plot-title">Cell content</div>
+          <div id="${{contentPlotId}}" class="plotly-chart cell-profile-chart"></div>
+        </div>
+      </div>
+    `;
+    container.appendChild(card);
+    renderCellStatePlot(statePlotId, edge, snapshot);
+    if (!renderCellContentPlot(contentPlotId, edge, snapshot)) {{
+      document.getElementById(contentPlotId).replaceWith(
+        emptyState("No cell_content rows at this snapshot.")
+      );
+    }}
+  }}
+
+  function renderCellStatePlot(plotId, edge, snapshot) {{
+    const x = cellX(edge);
+    const customdata = cellCustomData(edge);
+    const traces = [];
+    (edge.phases || []).forEach((phase, phaseIndex) => {{
+      const fractions = snapshot.phaseFractions[phase] || x.map(() => 0);
+      const temperatures = snapshot.temperatures[phase] || x.map(() => null);
+      if (hasNonZero(fractions) || hasFiniteValue(temperatures)) {{
+        traces.push({{
+          x,
+          y: fractions,
+          customdata,
+          mode: "lines+markers",
+          name: `${{phase}} fraction`,
+          type: "scatter",
+          line: {{ width: 2.2, color: colorway[phaseIndex % colorway.length] }},
+          marker: {{ size: 5 }},
+          hovertemplate:
+            "%{{fullData.name}}<br>cell=%{{customdata[0]}}" +
+            "<br>x=%{{x:.6g}}<br>fraction=%{{y:.6g}}<extra></extra>"
+        }});
+      }}
+      if (hasFiniteValue(temperatures)) {{
+        traces.push({{
+          x,
+          y: temperatures,
+          customdata,
+          mode: "lines+markers",
+          name: `${{phase}} temperature`,
+          type: "scatter",
+          yaxis: "y2",
+          line: {{
+            dash: "dot",
+            width: 1.8,
+            color: colorway[(phaseIndex + 5) % colorway.length]
+          }},
+          marker: {{ size: 4 }},
+          hovertemplate:
+            "%{{fullData.name}}<br>cell=%{{customdata[0]}}" +
+            "<br>x=%{{x:.6g}}<br>temperature=%{{y:.6g}} K<extra></extra>"
+        }});
+      }}
+    }});
+    const layout = {{
+      autosize: true,
+      colorway,
+      hovermode: "closest",
+      margin: {{ t: 12, r: 72, b: 54, l: 58 }},
+      paper_bgcolor: "#ffffff",
+      plot_bgcolor: "#ffffff",
+      xaxis: {{
+        title: {{ text: edge.xLabel, standoff: 8 }},
+        gridcolor: "#e9edf2",
+        zerolinecolor: "#cbd4df"
+      }},
+      yaxis: {{
+        title: {{ text: "Phase fraction", standoff: 8 }},
+        gridcolor: "#e9edf2",
+        range: [-0.02, 1.02],
+        zerolinecolor: "#cbd4df"
+      }},
+      yaxis2: {{
+        title: {{ text: "Temperature (K)", standoff: 8 }},
+        overlaying: "y",
+        side: "right",
+        showgrid: false,
+        zeroline: false
+      }},
+      legend: {{
+        orientation: "h",
+        y: -0.25,
+        x: 0,
+        font: {{ size: 11 }}
+      }}
+    }};
+    Plotly.react(plotId, traces, layout, plotConfig());
+  }}
+
+  function renderCellContentPlot(plotId, edge, snapshot) {{
+    const x = cellX(edge);
+    const customdata = cellCustomData(edge);
+    const traces = [];
+    (edge.species || []).forEach((item, speciesIndex) => {{
+      const values = snapshot.contents[item.key] || x.map(() => 0);
+      if (!hasNonZero(values)) return;
+      traces.push({{
+        x,
+        y: values,
+        customdata,
+        mode: "lines+markers",
+        name: item.name,
+        type: "scatter",
+        line: {{ width: 2.1, color: colorway[speciesIndex % colorway.length] }},
+        marker: {{ size: 5 }},
+        hovertemplate:
+          "%{{fullData.name}}<br>cell=%{{customdata[0]}}" +
+          "<br>x=%{{x:.6g}}<br>moles=%{{y:.6g}} mol<extra></extra>"
+      }});
+    }});
+    if (!traces.length) return false;
+    const layout = {{
+      autosize: true,
+      colorway,
+      hovermode: "closest",
+      margin: {{ t: 12, r: 18, b: 54, l: 68 }},
+      paper_bgcolor: "#ffffff",
+      plot_bgcolor: "#ffffff",
+      xaxis: {{
+        title: {{ text: edge.xLabel, standoff: 8 }},
+        gridcolor: "#e9edf2",
+        zerolinecolor: "#cbd4df"
+      }},
+      yaxis: {{
+        title: {{ text: "Moles (mol)", standoff: 10 }},
+        gridcolor: "#e9edf2",
+        zerolinecolor: "#cbd4df"
+      }},
+      legend: {{
+        orientation: "h",
+        y: -0.25,
+        x: 0,
+        font: {{ size: 11 }}
+      }}
+    }};
+    Plotly.react(plotId, traces, layout, plotConfig());
+    return true;
+  }}
+
+  function cellX(edge) {{
+    return (edge.cells || []).map((cell) =>
+      edge.xLabel === "Cell position (m)" ? cell.center : cell.index
+    );
+  }}
+
+  function cellCustomData(edge) {{
+    return (edge.cells || []).map((cell) => [
+      cell.index,
+      cell.position,
+      cell.length
+    ]);
+  }}
+
+  function hasFiniteValue(values) {{
+    return values.some((value) =>
+      value !== null && value !== undefined && Number.isFinite(Number(value))
+    );
+  }}
+
+  function hasNonZero(values) {{
+    return values.some((value) =>
+      value !== null &&
+      value !== undefined &&
+      Number.isFinite(Number(value)) &&
+      Math.abs(Number(value)) > 0
+    );
+  }}
+
+  function plotConfig() {{
+    return {{
+      displaylogo: false,
+      responsive: true,
+      scrollZoom: true,
+      modeBarButtonsToRemove: ["lasso2d", "select2d"]
+    }};
+  }}
+
   function emptyState(text) {{
     const node = document.createElement("div");
     node.className = "empty-state";
@@ -739,7 +1214,7 @@ def _build_html(
       species: "Species",
       temperatures: "Temperatures"
     }};
-    tabs.forEach((tab) => {{
+    chartTabs.forEach((tab) => {{
       const charts = payload.charts.filter((chart) => chart.tab === tab);
       const traceCount = charts.reduce((sum, chart) => sum + chart.traces.length, 0);
       const defaultCount = charts.reduce(
@@ -764,6 +1239,24 @@ def _build_html(
       `;
       container.appendChild(card);
     }});
+    const cellEdges = cellProfiles.edges || [];
+    const cellCount = cellEdges.reduce((sum, edge) => sum + edge.cellCount, 0);
+    const cellSpecies = cellEdges.reduce(
+      (sum, edge) => sum + edge.species.length,
+      0
+    );
+    const cellCard = document.createElement("div");
+    cellCard.className = "dataset-card";
+    cellCard.innerHTML = `
+      <div class="dataset-title">Pipe Cells</div>
+      <div class="dataset-meta">
+        ${{cellEdges.length}} edge(s), ${{cellCount}} cell(s)
+      </div>
+      <div class="dataset-meta">
+        ${{cellTimes.length}} snapshot(s), ${{cellSpecies}} species trace(s)
+      </div>
+    `;
+    container.appendChild(cellCard);
   }}
 
   function escapeHtml(value) {{
@@ -778,7 +1271,7 @@ def _build_html(
   document.querySelectorAll(".tab-button").forEach((button) => {{
     button.addEventListener("click", () => setTab(button.dataset.tab));
   }});
-  tabs.forEach((tab) => {{
+  chartTabs.forEach((tab) => {{
     const input = document.querySelector(`[data-search="${{tab}}"]`);
     const flatToggle = document.querySelector(`[data-show-flat="${{tab}}"]`);
     const reset = document.querySelector(`[data-reset-tab="${{tab}}"]`);
@@ -803,7 +1296,26 @@ def _build_html(
       renderTab(tab);
     }});
   }});
+  const cellSearch = document.querySelector("[data-cell-search]");
+  const cellTimeSelect = document.querySelector("[data-cell-time]");
+  const cellReset = document.querySelector("[data-reset-cells]");
+  cellSearch.addEventListener("input", () => {{
+    state.cellQuery = cellSearch.value;
+    renderCells();
+  }});
+  cellTimeSelect.addEventListener("change", () => {{
+    state.cellTimeKey = cellTimeSelect.value;
+    renderCells();
+  }});
+  cellReset.addEventListener("click", () => {{
+    state.cellQuery = "";
+    state.cellTimeKey = latestCellTime;
+    cellSearch.value = "";
+    cellTimeSelect.value = latestCellTime;
+    renderCells();
+  }});
 
+  populateCellTimeSelect();
   renderDatasetSummary();
 }})();
 </script>
@@ -971,16 +1483,19 @@ def _build_summary(
     inv_states: dict[str, list],
     species_moles: dict[str, dict[str, list]],
     cell_temps: dict[str, list],
+    cell_profiles: dict[str, Any],
 ) -> dict[str, Any]:
-    all_times = sorted(
-        {
-            t
-            for points in _all_point_lists(
-                node_pressures, edge_flows, inv_states, species_moles, cell_temps
-            )
-            for t in _times_from_points(points)
-        }
+    all_time_values = {
+        t
+        for points in _all_point_lists(
+            node_pressures, edge_flows, inv_states, species_moles, cell_temps
+        )
+        for t in _times_from_points(points)
+    }
+    all_time_values.update(
+        float(item["value"]) for item in cell_profiles.get("times", [])
     )
+    all_times = sorted(all_time_values)
     t_min = min(all_times, default=0.0)
     t_max = max(all_times, default=0.0)
     pressure_values = [p for pts in node_pressures.values() for _, p in pts]
@@ -993,6 +1508,12 @@ def _build_summary(
         for species_dict in species_moles.values()
         for species_id in species_dict
     }
+    cell_edges = cell_profiles.get("edges", [])
+    cell_species = {
+        (item["phase"], item["speciesId"])
+        for edge in cell_edges
+        for item in edge["species"]
+    }
 
     metrics = [
         _metric("Duration", t_max - t_min, "s"),
@@ -1001,6 +1522,13 @@ def _build_summary(
         _metric("Edges", len(edge_flows), ""),
         _metric("Inventories", len(inv_states), ""),
         _metric("Species", len(species_ids), ""),
+        _metric("Pipe Edges", len(cell_edges), ""),
+        _metric(
+            "Pipe Cells",
+            sum(int(edge["cellCount"]) for edge in cell_edges),
+            "",
+        ),
+        _metric("Cell Species", len(cell_species), ""),
         _metric(
             "Max Pressure",
             max(pressure_values) if pressure_values else None,
@@ -1110,6 +1638,24 @@ def _render_chart_tab(tab: str, search_placeholder: str) -> str:
   </section>"""
 
 
+def _render_cell_tab() -> str:
+    return """
+  <section class="tab-panel" data-panel="cells">
+    <div class="toolbar">
+      <input
+        class="search-input"
+        data-cell-search
+        type="search"
+        placeholder="Search pipe-cell profiles"
+      >
+      <select class="select-input" data-cell-time aria-label="Snapshot time"></select>
+      <button class="control-button" data-reset-cells>Reset cells</button>
+    </div>
+    <div id="cell-profile-summary" class="panel-subtitle"></div>
+    <div id="cell-profiles"></div>
+  </section>"""
+
+
 def _json_script_payload(payload: dict[str, Any]) -> str:
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return (
@@ -1130,3 +1676,11 @@ def _format_number(value: float) -> str:
 
 def _round_time(value: float) -> float:
     return round(value, 10)
+
+
+def _time_key(value: float) -> str:
+    return f"{_round_time(value):.10g}"
+
+
+def _content_trace_key(phase: str, species_id: str) -> str:
+    return json.dumps([phase, species_id], separators=(",", ":"))

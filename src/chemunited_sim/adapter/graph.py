@@ -14,6 +14,7 @@ from chemunited_core.common.enums import ConnectionType
 from chemunited_core.components import ComponentData
 from chemunited_core.components.enums import InternalEdgeRole
 from chemunited_core.components.internals import InventoryNode
+from chemunited_core.components.plugflow import PlugFlowComponentData
 from chemunited_core.connections.edge import EdgeData
 from loguru import logger
 
@@ -100,6 +101,8 @@ def compile_graph(
             raise ValueError(f"Duplicate component name '{comp.name}'")
         seen_names.add(comp.name)
 
+        comp.apply_air_defaults()
+
         compiler = next(
             (_COMPILERS[cls] for cls in type(comp).mro() if cls in _COMPILERS),
             compile_component,
@@ -109,6 +112,8 @@ def compile_graph(
         for node in nodes:
             all_nodes[node.node_id] = node
         for edge in comp_edges:
+            if isinstance(comp, PlugFlowComponentData) and edge.role == InternalEdgeRole.TRANSPORT:
+                edge.content = list(comp.content)
             all_edges[edge.edge_id] = edge
 
         # Inventory snapshot (deep copy to decouple from live component state)
@@ -147,6 +152,8 @@ def compile_graph(
         if edge_data.name in all_edges:
             raise ValueError(f"Duplicate external edge ID '{edge_data.name}'")
 
+        edge_data.apply_air_defaults()
+
         all_edges[edge_data.name] = HydraulicEdge(
             edge_id=edge_data.name,
             origin_node_id=origin_node_id,
@@ -157,6 +164,7 @@ def compile_graph(
             resistance_override=None,
             component=None,
             is_external=True,
+            content=list(edge_data.content),
         )
 
     # ------------------------------------------------------------------

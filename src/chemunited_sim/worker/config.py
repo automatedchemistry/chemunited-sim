@@ -17,7 +17,8 @@ class SimConfig:
         Simulation time step in seconds.
     t_end:
         Simulation end time in seconds.  The worker runs from t=0 to t=t_end
-        inclusive.
+        inclusive.  When ``None`` in mode 1 (workflow), the server worker
+        auto-completes as soon as the workflow finishes and all queues are empty.
     viscosity:
         Dynamic viscosity of the carrier fluid in Pa·s.  Defaults to water
         at 25 °C (8.9 × 10⁻⁴ Pa·s).

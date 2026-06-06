@@ -19,14 +19,24 @@ def build_draw(platform) -> None:
     # ── Components ─────────────────────────────────────────────────────────────
     platform.add_component(name="gassupply", figure="Source", setpoint="1.3 bar")
     platform.add_component(
-        name="liquidpump", figure="SyringePump", flow_rate="3 ml/min"
+        name="liquidpump",
+        figure="SyringePump",
+        flow_rate="3 ml/min",
+        syringe_volume="10 ml",
+        syringe_actual_volume="10 ml",
+    )
+    platform.add_component(
+        name="liquidrecicly", figure="GlassBottle"
+    )
+    platform.add_component(
+        name="pump", figure="HPLCPump",  flow_rate="0.3 ml/min"
     )
     platform.add_component(name="productsink", figure="Sink")
     platform.add_component(name="wastesink", figure="Sink")
     platform.add_component(
         name="reactortube", figure="FlowReactor", length="5 cm", diameter="2 mm"
     )
-    platform.add_component(name="tmixer", figure="Distributor", number_ports=3)
+    platform.add_component(name="tmixer", figure="Distributor", number_ports=4)
     platform.add_component(
         name="reactor",
         figure="GlassBottle",
@@ -57,7 +67,18 @@ def build_draw(platform) -> None:
         initial_temperature=298.15,
     )
 
+    platform["liquidpump"].internal_inventory.liq_content = VolumeContentBase(
+        phase_kind="LIQUID",
+        volume=10e-6,
+        initial_species={"reagent_a": 1e-4, "solvent": 3.4e-2},
+    )
+
     # ── Connections ────────────────────────────────────────────────────────────
+    platform.add_connection(
+        "liquidrecicly", "pump", 1, 1, length="7 cm", diameter="1.5 mm"
+    )
+    platform.add_connection("pump", "tmixer", 2, 4, length="7 cm", diameter="1.5 mm")
+
     platform.add_connection("gassupply", "mfc", 1, 1, length="7 cm", diameter="1.5 mm")
     platform.add_connection("mfc", "tmixer", 2, 1, length="7 cm", diameter="1.5 mm")
     platform.add_connection(

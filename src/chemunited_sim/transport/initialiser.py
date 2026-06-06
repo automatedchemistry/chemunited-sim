@@ -1,43 +1,32 @@
 """Initial transport state builder for chemunited-sim.
 
-Fills every TRANSPORT-role edge with a single air pocket sized to the
-geometric internal volume of the edge.  JUNCTION-role edges are excluded
-(they are lossless connectors with no physical volume).
+Seeds TRANSPORT edges from their ``content`` list (set during graph compilation).
+Each segment in ``content`` becomes one initial :class:`Pocket`.  JUNCTION-role
+edges are excluded (lossless, no physical volume).
 """
 
 from __future__ import annotations
 
-import math
 from collections import deque
 
-from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components.enums import InternalEdgeRole
 
 from ..adapter.models import HydraulicGraph
-from ..common.constant import (
-    AMBIENT_TEMPERATURE_K,
-    ATMOSPHERE_PRESSURE_PA,
-    MIN_POCKET_VOLUME,
-)
+from ..common.constant import MIN_POCKET_VOLUME
 from .models import Pocket, TransportState
 
 
 def build_initial_state(graph: HydraulicGraph) -> TransportState:
-    """Create a :class:`TransportState` with all transport edges filled with air.
+    """Create a :class:`TransportState` seeded from each edge's ``content`` list.
 
-    Each TRANSPORT edge receives one :class:`Pocket` whose volume equals the
-    geometric cross-sectional volume of the edge:
-    ``V = π · (D/2)² · L``.
-
-    Edges with zero or negative diameter are assigned an empty queue.
-    Edges whose computed volume falls below
-    :data:`~chemunited_sim.common.constant.MIN_POCKET_VOLUME` are also left
-    empty.
+    Each entry in ``HydraulicEdge.content`` becomes one initial
+    :class:`Pocket`.  Edges with an empty ``content`` list (e.g.
+    zero-length edges) get an empty queue.
 
     Parameters
     ----------
     graph:
-        The compiled hydraulic graph whose edges define edge geometry.
+        The compiled hydraulic graph whose edges carry their initial content.
 
     Returns
     -------
@@ -50,26 +39,24 @@ def build_initial_state(graph: HydraulicGraph) -> TransportState:
         if edge.role != InternalEdgeRole.TRANSPORT:
             continue
 
-        if edge.diameter <= 0.0 or edge.length <= 0.0:
+        if not edge.content:
             edge_queues[edge_id] = deque()
             continue
 
-        volume = math.pi * (edge.diameter / 2.0) ** 2 * edge.length
-
-        if volume < MIN_POCKET_VOLUME:
-            edge_queues[edge_id] = deque()
-            continue
-
-        edge_queues[edge_id] = deque(
-            [
+        pockets = []
+        for seg in edge.content:
+            if seg.volume < MIN_POCKET_VOLUME:
+                continue
+            pockets.append(
                 Pocket(
-                    phase_kind=PhaseKind.GAS,
-                    volume=volume,
-                    species_moles={},
-                    temperature=AMBIENT_TEMPERATURE_K,
-                    pressure=ATMOSPHERE_PRESSURE_PA,
+                    phase_kind=seg.phase_kind,
+                    volume=seg.volume,
+                    species_moles=dict(seg.initial_species),
+                    temperature=seg.initial_temperature,
+                    pressure=seg.initial_pressure,
                 )
-            ]
-        )
+            )
+
+        edge_queues[edge_id] = deque(pockets)
 
     return TransportState(edge_queues=edge_queues)

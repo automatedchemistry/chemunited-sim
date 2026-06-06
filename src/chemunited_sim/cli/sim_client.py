@@ -47,11 +47,5 @@ class SimClient:
         while self._clock.now() - t0 < wait_time:
             time.sleep(0.0001)
 
-    def wait_sim_time(self, sim_seconds: float) -> None:
-        """Block the workflow thread until sim_seconds of simulated time elapse."""
-        t0 = self._clock.now()
-        while self._clock.now() - t0 < sim_seconds:
-            time.sleep(0.0001)
-
     def get(self, command: str, **kwargs: Any) -> Any:
         return self._component.get(command, **kwargs)

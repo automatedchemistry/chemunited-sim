@@ -274,6 +274,85 @@ def test_render_dashboard_html_hides_flat_traces_by_default(workspace_tmp):
     assert traces["n1"]["defaultVisible"] is False
 
 
+def test_render_dashboard_html_includes_pipe_cell_profiles(workspace_tmp):
+    db_path = workspace_tmp / "cells.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE meta (key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE node_pressure (
+            time REAL NOT NULL,
+            node_id TEXT NOT NULL,
+            pressure REAL NOT NULL
+        );
+        CREATE TABLE edge_flow (
+            time REAL NOT NULL,
+            edge_id TEXT NOT NULL,
+            flow_rate REAL NOT NULL
+        );
+        CREATE TABLE edge_cells (
+            edge_id TEXT NOT NULL,
+            cell_index INTEGER NOT NULL,
+            position_m REAL NOT NULL,
+            length_m REAL NOT NULL
+        );
+        CREATE TABLE cell_state (
+            time REAL NOT NULL,
+            edge_id TEXT NOT NULL,
+            cell_index INTEGER NOT NULL,
+            phase TEXT NOT NULL,
+            phase_fraction REAL NOT NULL,
+            temperature REAL NOT NULL
+        );
+        CREATE TABLE cell_content (
+            time REAL NOT NULL,
+            edge_id TEXT NOT NULL,
+            cell_index INTEGER NOT NULL,
+            phase TEXT NOT NULL,
+            species_id TEXT NOT NULL,
+            moles REAL NOT NULL
+        );
+        INSERT INTO meta VALUES ('platform_name', 'cells');
+        INSERT INTO node_pressure VALUES (0.0, 'n0', 101325.0);
+        INSERT INTO edge_flow VALUES (0.0, 'e0', 0.0);
+        INSERT INTO edge_cells VALUES ('e0', 0, 0.0, 0.01);
+        INSERT INTO edge_cells VALUES ('e0', 1, 0.01, 0.01);
+        INSERT INTO cell_state VALUES (0.0, 'e0', 0, 'liquid', 1.0, 300.0);
+        INSERT INTO cell_state VALUES (0.0, 'e0', 1, 'liquid', 0.4, 305.0);
+        INSERT INTO cell_state VALUES (0.0, 'e0', 1, 'gas', 0.6, 310.0);
+        INSERT INTO cell_content VALUES (0.0, 'e0', 0, 'liquid', 'water', 2.0);
+        INSERT INTO cell_content VALUES (0.0, 'e0', 1, 'liquid', 'water', 0.5);
+        INSERT INTO cell_content VALUES (0.0, 'e0', 1, 'gas', 'nitrogen', 0.25);
+        """)
+    conn.close()
+
+    html = render_dashboard_html(db_path)
+    payload = _dashboard_payload(html)
+
+    assert 'data-tab="cells"' in html
+    assert "Pipe Cells" in html
+    assert payload["cellProfiles"]["times"] == [
+        {"key": "0", "value": 0.0, "label": "0 s"}
+    ]
+    edge = payload["cellProfiles"]["edges"][0]
+    assert edge["edgeId"] == "e0"
+    assert edge["cellCount"] == 2
+    assert edge["xLabel"] == "Cell position (m)"
+    assert [cell["center"] for cell in edge["cells"]] == pytest.approx([0.005, 0.015])
+
+    snapshot = edge["snapshots"]["0"]
+    assert snapshot["phaseFractions"]["liquid"] == pytest.approx([1.0, 0.4])
+    assert snapshot["phaseFractions"]["gas"] == pytest.approx([0.0, 0.6])
+    assert snapshot["temperatures"]["gas"] == [None, 310.0]
+    water_key = next(
+        item["key"] for item in edge["species"] if item["speciesId"] == "water"
+    )
+    nitrogen_key = next(
+        item["key"] for item in edge["species"] if item["speciesId"] == "nitrogen"
+    )
+    assert snapshot["contents"][water_key] == pytest.approx([2.0, 0.5])
+    assert snapshot["contents"][nitrogen_key] == pytest.approx([0.0, 0.25])
+
+
 def test_render_dashboard_html_escapes_metadata(workspace_tmp):
     graph = _simple_graph()
     db_path = workspace_tmp / "escaped.db"

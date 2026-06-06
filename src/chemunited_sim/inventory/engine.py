@@ -10,14 +10,17 @@ transport edge, using the port-access mapping to select the correct phase.
 from __future__ import annotations
 
 from chemunited_core.common.enums import PhaseKind
+from chemunited_core.compounds.entity import IDEAL_GAS_CONSTANT
 from chemunited_core.components.enums import PortAccess
 from loguru import logger
 
-from ..common.constant import MIN_POCKET_VOLUME
+from ..adapter.models import HydraulicGraph
+from ..common.constant import AMBIENT_TEMPERATURE_K, ATMOSPHERE_PRESSURE_PA, MIN_POCKET_VOLUME
 from ..hydraulics.models import HydraulicState
 from ..transport.models import Pocket
 from .models import InventoryState
 from .port_map import PortAccessMap
+from .source_map import SourceMap
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -210,5 +213,143 @@ def emit(
             temperature=state.temperature,
             pressure=state.pressure,
         )
+
+    return emitted
+
+
+def emit_from_sources(
+    source_map: SourceMap,
+    graph: HydraulicGraph,
+    hyd_state: HydraulicState,
+    syringe_actual: dict[str, float],
+    dt: float,
+) -> dict[str, Pocket]:
+    """Emit species-carrying pockets from FlowSource boundary components.
+
+    Unlike vessel emission, FlowSource nodes are infinite reservoirs — their
+    declared concentration (``initial_species / liq_content.volume``) stays
+    constant and is never depleted.  SyringePump nodes are finite: their
+    remaining liquid volume is tracked in *syringe_actual* and updated here;
+    when exhausted the pocket falls back to air.
+
+    Parameters
+    ----------
+    source_map:
+        ``{edge_id: SourceEdgeEntry}`` built once at startup.
+    graph:
+        The compiled hydraulic graph; used to read the immutable inventory
+        snapshot for concentration calculations.
+    hyd_state:
+        Current hydraulic solve result; provides edge flows and node pressures.
+    syringe_actual:
+        Mutable mapping of ``{comp_name: remaining_liquid_m3}`` for every
+        SyringePump component.  Updated in-place as liquid is dispensed.
+    dt:
+        Simulation time step in seconds.
+
+    Returns
+    -------
+    dict[str, Pocket]
+        ``{edge_id: Pocket}`` — one pocket per source edge with nonzero flow.
+    """
+    from chemunited_core.figure_registry.pumps import SyringePumpData  # local to avoid circular
+
+    emitted: dict[str, Pocket] = {}
+
+    for edge_id, entry in source_map.items():
+        q = abs(hyd_state.flows.get(edge_id, 0.0))
+        dV = q * dt
+        if dV < MIN_POCKET_VOLUME:
+            continue
+
+        inv_node = graph.inventory_nodes.get(entry.inv_node_id)
+        P = hyd_state.pressures.get(entry.source_node_id, ATMOSPHERE_PRESSURE_PA)
+
+        # Determine phase preference from component type / direction_upward
+        is_syringe = isinstance(entry.comp, SyringePumpData)
+        direction_upward = getattr(entry.comp, "direction_upward", True)
+        primary_liquid = direction_upward  # True → emit liquid; False → emit gas
+
+        if is_syringe:
+            remaining = syringe_actual.get(entry.comp.name, 0.0)
+            emit_vol = min(dV, remaining) if remaining > MIN_POCKET_VOLUME else 0.0
+
+            if emit_vol > MIN_POCKET_VOLUME and primary_liquid:
+                # Emit liquid pocket
+                liq = inv_node.liq_content if inv_node is not None else None
+                if liq is not None and liq.volume > 0 and liq.initial_species:
+                    species_moles = {
+                        k: (n / liq.volume) * emit_vol
+                        for k, n in liq.initial_species.items()
+                    }
+                else:
+                    species_moles = {}
+                syringe_actual[entry.comp.name] = remaining - emit_vol
+                if syringe_actual[entry.comp.name] <= 0:
+                    logger.warning(
+                        "emit_from_sources: SyringePump '{}' ran dry",
+                        entry.comp.name,
+                    )
+                emitted[edge_id] = Pocket(
+                    phase_kind=PhaseKind.LIQUID,
+                    volume=emit_vol,
+                    species_moles=species_moles,
+                    temperature=AMBIENT_TEMPERATURE_K,
+                    pressure=P,
+                )
+            else:
+                # Liquid exhausted (or direction_upward=False) → air fallback
+                n_air = P / (IDEAL_GAS_CONSTANT * AMBIENT_TEMPERATURE_K)
+                emitted[edge_id] = Pocket(
+                    phase_kind=PhaseKind.GAS,
+                    volume=dV,
+                    species_moles={"air": n_air * dV},
+                    temperature=AMBIENT_TEMPERATURE_K,
+                    pressure=P,
+                )
+        else:
+            # FlowSourceData base class — infinite reservoir, constant concentration
+            if primary_liquid:
+                liq = inv_node.liq_content if inv_node is not None else None
+                if liq is not None and liq.volume > 0 and liq.initial_species:
+                    species_moles = {
+                        k: (n / liq.volume) * dV
+                        for k, n in liq.initial_species.items()
+                    }
+                    emitted[edge_id] = Pocket(
+                        phase_kind=PhaseKind.LIQUID,
+                        volume=dV,
+                        species_moles=species_moles,
+                        temperature=AMBIENT_TEMPERATURE_K,
+                        pressure=P,
+                    )
+                else:
+                    # No liquid declared → fall back to air
+                    n_air = P / (IDEAL_GAS_CONSTANT * AMBIENT_TEMPERATURE_K)
+                    emitted[edge_id] = Pocket(
+                        phase_kind=PhaseKind.GAS,
+                        volume=dV,
+                        species_moles={"air": n_air * dV},
+                        temperature=AMBIENT_TEMPERATURE_K,
+                        pressure=P,
+                    )
+            else:
+                # direction_upward=False → gas source
+                gas = inv_node.gas_content if inv_node is not None else None
+                if gas is not None and gas.volume > 0 and gas.initial_species:
+                    species_moles = {
+                        k: (n / gas.volume) * dV
+                        for k, n in gas.initial_species.items()
+                    }
+                else:
+                    n_air = P / (IDEAL_GAS_CONSTANT * AMBIENT_TEMPERATURE_K)
+                    species_moles = {"air": n_air * dV}
+                emitted[edge_id] = Pocket(
+                    phase_kind=PhaseKind.GAS,
+                    volume=dV,
+                    species_moles=species_moles,
+                    temperature=AMBIENT_TEMPERATURE_K,
+                    pressure=P,
+                )
 
     return emitted

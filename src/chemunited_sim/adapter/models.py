@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from chemunited_core.components.enums import InternalEdgeRole
 from chemunited_core.components.internals import InventoryNode, PortBoundaryCondition
+from chemunited_core.compounds.pockets import VolumeContentBase
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ class HydraulicEdge:
     resistance_override: float | None
     component: str | None
     is_external: bool
+    content: list[VolumeContentBase] = field(default_factory=list)
 
 
 @dataclass

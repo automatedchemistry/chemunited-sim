@@ -17,6 +17,7 @@ Operator-splitting order (CLAUDE.md):
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from chemunited_core.common.constant import R_MAX_HYDRAULIC
@@ -26,13 +27,17 @@ from chemunited_core.components import (
     MassFlowControllerData,
 )
 
+from chemunited_core.figure_registry.pumps import SyringePumpData
+from loguru import logger
+
 from ..adapter.models import HydraulicEdge, HydraulicGraph
 from ..hydraulics.models import HydraulicState
 from ..hydraulics.solver import solve
-from ..inventory.engine import assimilate, emit
+from ..inventory.engine import assimilate, emit, emit_from_sources
 from ..inventory.initialiser import build_inventory_states
 from ..inventory.models import InventoryState
 from ..inventory.port_map import PortAccessMap, build_port_map
+from ..inventory.source_map import SourceMap, build_source_map
 from ..reactions.engine import apply
 from ..reactions.models import ReactionsMap
 from ..recorder.writer import Recorder
@@ -167,6 +172,12 @@ class Worker:
         self._transport_state: TransportState = build_initial_state(graph)
         self._inv_states: dict[str, InventoryState] = build_inventory_states(graph)
         self._port_map: PortAccessMap = build_port_map(graph, components)
+        self._source_map: SourceMap = build_source_map(graph, components)
+        self._syringe_actual: dict[str, float] = {
+            entry.comp.name: entry.comp.syringe_actual_volume.to_base_units().magnitude
+            for entry in self._source_map.values()
+            if isinstance(entry.comp, SyringePumpData)
+        }
         self._bpr_entries: list[_BprEntry] = _build_bpr_entries(graph, components)
         self._mfc_entries: list[_MfcEntry] = _build_mfc_entries(graph, components)
 
@@ -262,8 +273,30 @@ class Worker:
         # 7. Emit replacement pockets from inventories
         emitted = emit(self._inv_states, result.departures, self._port_map)
 
+        # 7.5. Emit from FlowSource boundary components (infinite or finite syringe)
+        source_emitted = emit_from_sources(
+            self._source_map, self._graph, hyd_state, self._syringe_actual, self._config.dt
+        )
+
+        # Track syringe withdraw (Q < 0 means fluid drawn back into syringe)
+        for edge_id, entry in self._source_map.items():
+            if not isinstance(entry.comp, SyringePumpData):
+                continue
+            q = hyd_state.flows.get(edge_id, 0.0)
+            if q < 0:
+                dV = abs(q) * self._config.dt
+                self._syringe_actual[entry.comp.name] += dV
+                cap = entry.comp.syringe_volume.to_base_units().magnitude
+                if self._syringe_actual[entry.comp.name] > cap:
+                    logger.warning(
+                        "worker: SyringePump '{}' exceeded fill capacity",
+                        entry.comp.name,
+                    )
+
         # 8. Inject emitted pockets into transport queues
-        self._transport_state = inject(result.next_state, emitted, hyd_state)
+        self._transport_state = inject(
+            result.next_state, {**emitted, **source_emitted}, hyd_state
+        )
 
         # 9. Advance time
         self._t += self._config.dt
@@ -273,25 +306,40 @@ class Worker:
     # Run interface
     # ------------------------------------------------------------------
 
-    def run(self) -> None:
-        """Run the simulation from the current time to ``config.t_end``.
+    def run(self, stop_condition: Callable[[], bool] | None = None) -> None:
+        """Run the simulation until ``config.t_end`` or *stop_condition* fires.
 
-        Steps the simulation until ``t`` reaches ``t_end`` (inclusive).
-        Uses integer-tick arithmetic to avoid floating-point drift:
+        Exactly one of the two termination criteria must be reachable:
 
-            n_end = round(t_end / dt)
-            while round(t / dt) <= n_end: step()
+        - **``t_end``** (set in :class:`~chemunited_sim.worker.config.SimConfig`):
+          steps until ``t >= t_end``, using integer-tick arithmetic to avoid
+          floating-point drift.
+        - **``stop_condition``**: a zero-argument callable polled once per tick;
+          the loop exits on the first tick where it returns ``True``.  Useful
+          for open-ended standalone scripts — pass e.g. ``threading.Event().is_set``
+          or ``lambda: worker.t >= 60.0``.
+
+        If both are provided, whichever fires first wins.  If neither is
+        provided a ``ValueError`` is raised immediately.
 
         Closes the recorder after the last step if one was provided.
         """
-        if self._config.t_end is None:
+        if self._config.t_end is None and stop_condition is None:
             raise ValueError(
-                "Worker.run() requires t_end to be set. "
-                "For open-ended runs, drive the loop with step() directly."
+                "Worker.run() requires either t_end (set in SimConfig) or a "
+                "stop_condition callable.  For server-driven runs the worker "
+                "thread calls step() directly and does not use this method."
             )
         dt = self._config.dt
-        n_end = round(self._config.t_end / dt)
-        while round(self._t / dt) <= n_end:
+        n_end = (
+            round(self._config.t_end / dt) if self._config.t_end is not None else None
+        )
+        while True:
+            tick = round(self._t / dt)
+            if n_end is not None and tick > n_end:
+                break
+            if stop_condition is not None and stop_condition():
+                break
             self.step()
         if self._recorder is not None:
             self._recorder.close()

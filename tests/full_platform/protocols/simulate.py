@@ -61,11 +61,9 @@ class CustomProcess(Process[ProcessConfig]):
         return True
 
     def wait(self, _ctx: NodeExecutionContext) -> bool:
-        self.platform["divertvalve"].wait_sim_time(20.0)
-        self.platform["divertvalve"].put("close")
+        self.platform["divertvalve"].put("open", wait_time=20.0)
         remaining = max(0.0, self.config.wait_time - 20.0)
-        if remaining > 0.0:
-            self.platform["divertvalve"].wait_sim_time(remaining)
+        self.platform["divertvalve"].put("close", wait_time=remaining)
         return True
 
     def finish(self, ctx: NodeExecutionContext) -> bool:
