@@ -14,11 +14,9 @@ requires-python = ">=3.11"
 dependencies = [
     "chemunited-core @ git+https://github.com/automatedchemistry/chemunited-core.git",
     "chemunited-workflow @ git+https://github.com/automatedchemistry/chemunited-workflow.git",
-    "loguru>=0.7",
-    "numpy>=1.26",
     "scipy>=1.12",
-    "fastapi>=0.100",
-    "uvicorn[standard]>=0.23",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.29",
     "pyvis>=0.3.2",
 ]
 
