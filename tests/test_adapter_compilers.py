@@ -8,8 +8,8 @@ from chemunited_sim.adapter import compile_graph
 
 
 def test_solenoid_valve_2_way_common_port_compiles_as_hub():
-    data_cls, mode_cls = COMPONENTS["SolenoidValve2Way"]
-    valve = data_cls.from_mode(mode_cls(name="divertvalve"))
+    defn = COMPONENTS["SolenoidValve2Way"]
+    valve = defn.data_class.from_mode(defn.mode_class(name="divertvalve"))
 
     graph = compile_graph([valve], [])
 

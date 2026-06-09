@@ -39,7 +39,8 @@ class PlatformBuilder:
         if name in self._components:
             raise ValueError(f"Duplicate component name '{name}'")
 
-        data_cls, mode_cls = COMPONENTS[figure]
+        defn = COMPONENTS[figure]
+        data_cls, mode_cls = defn.data_class, defn.mode_class
         mode = mode_cls(name=name, position=position, angle=angle, **kwargs)
         data = data_cls.from_mode(mode)
         self._components[name] = data
