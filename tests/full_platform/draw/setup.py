@@ -21,7 +21,6 @@ def build_draw(platform) -> None:
     platform.add_component(
         name="liquidpump",
         figure="SyringePump",
-        flow_rate="3 ml/min",
         syringe_volume="10 ml",
         syringe_actual_volume="10 ml",
     )
@@ -29,7 +28,7 @@ def build_draw(platform) -> None:
         name="liquidrecicly", figure="GlassBottle"
     )
     platform.add_component(
-        name="pump", figure="HPLCPump",  flow_rate="0.3 ml/min"
+        name="pump", figure="HPLCPump"
     )
     platform.add_component(name="productsink", figure="Sink")
     platform.add_component(name="wastesink", figure="Sink")
@@ -49,7 +48,7 @@ def build_draw(platform) -> None:
         name="bpr", figure="BackPressureRegulator", setpoint="1.2 bar"
     )
     platform.add_component(name="divertvalve", figure="SolenoidValve2Way")
-    platform.add_component(name="mfc", figure="MFCComponent", setpoint="0.5 ml/min")
+    platform.add_component(name="mfc", figure="MFCComponent")
 
     platform["reactor"].internal_inventory.liq_content = VolumeContentBase(
         phase_kind="LIQUID",

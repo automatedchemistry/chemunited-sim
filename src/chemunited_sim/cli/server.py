@@ -162,16 +162,19 @@ def _worker_thread_fn(
                     cmd.command,
                     cmd.kwargs,
                 )
-                result = components[cmd.component].apply(cmd.command, **cmd.kwargs)
-                resync_component(graph, components[cmd.component])
-                for s in result.scheduled:
-                    heapq.heappush(
-                        scheduled,
-                        (
-                            clock.now() + s.dt,
-                            SimCommand(cmd.component, s.command, s.kwargs),
-                        ),
-                    )
+                if cmd.pre_applied:
+                    resync_component(graph, components[cmd.component])
+                else:
+                    result = components[cmd.component].apply(cmd.command, **cmd.kwargs)
+                    resync_component(graph, components[cmd.component])
+                    for s in result.scheduled:
+                        heapq.heappush(
+                            scheduled,
+                            (
+                                clock.now() + s.dt,
+                                SimCommand(cmd.component, s.command, s.kwargs),
+                            ),
+                        )
 
             # 2. Fire scheduled events that are now due
             while scheduled and scheduled[0][0] <= clock.now():
