@@ -9,6 +9,8 @@ transport edge, using the port-access mapping to select the correct phase.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from chemunited_core.common.enums import PhaseKind
 from chemunited_core.compounds import COMPOUNDS
 from chemunited_core.compounds.entity import IDEAL_GAS_CONSTANT
@@ -48,6 +50,48 @@ def _thermal_mass(species_moles: dict[str, float], phase_kind: PhaseKind) -> flo
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HeatExchangeEntry:
+    """Static parameters for one vessel's wall heat exchange.
+
+    Built once at ``Worker`` construction; U, A, and T_wall are resolved
+    from the component's runtime properties at that point.
+    """
+
+    inv_node_id: str
+    U: float          # overall heat transfer coefficient, W/(m²·K)
+    contact_area: float  # wetted surface area, m²
+    T_wall: float     # jacket / wall temperature, K
+
+
+def apply_heat_exchange(
+    states: dict[str, InventoryState],
+    entries: list[HeatExchangeEntry],
+    dt: float,
+) -> None:
+    """Apply Newton's law of cooling for each vessel with heat exchange enabled.
+
+    Q_dot = U · A · (T_wall − T_vessel)
+    ΔT    = Q_dot · dt / C_thermal
+
+    Skips vessels with zero tracked-species thermal mass to avoid
+    divide-by-zero (matches the fallback logic in ``assimilate``).
+    Mutates *states* in-place.
+    """
+    for entry in entries:
+        state = states.get(entry.inv_node_id)
+        if state is None:
+            continue
+        c_thermal = (
+            _thermal_mass(state.liq_species_moles, PhaseKind.LIQUID)
+            + _thermal_mass(state.gas_species_moles, PhaseKind.GAS)
+        )
+        if c_thermal <= 0.0:
+            continue
+        q_dot = entry.U * entry.contact_area * (entry.T_wall - state.temperature)
+        state.temperature += q_dot * dt / c_thermal
 
 
 def assimilate(

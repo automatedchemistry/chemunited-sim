@@ -26,6 +26,7 @@ from chemunited_core.components import (
     ComponentData,
     MassFlowControllerData,
     PumpData,
+    VesselComponentData,
 )
 
 from chemunited_core.figure_registry.pumps import SyringePumpData
@@ -34,7 +35,7 @@ from loguru import logger
 from ..adapter.models import HydraulicEdge, HydraulicGraph
 from ..hydraulics.models import HydraulicState
 from ..hydraulics.solver import solve
-from ..inventory.engine import assimilate, emit, emit_from_sources
+from ..inventory.engine import HeatExchangeEntry, apply_heat_exchange, assimilate, emit, emit_from_sources
 from ..inventory.initialiser import build_inventory_states
 from ..inventory.models import InventoryState
 from ..inventory.port_map import PortAccessMap, build_port_map
@@ -156,6 +157,41 @@ def _build_mfc_entries(
     return entries
 
 
+def _build_heat_exchange_entries(
+    components: list[ComponentData],
+) -> list[HeatExchangeEntry]:
+    """Build heat exchange entries for all vessels with heat_exchange=True."""
+    entries: list[HeatExchangeEntry] = []
+    for comp in components:
+        if not isinstance(comp, VesselComponentData):
+            continue
+        if not comp.heat_exchange:
+            continue
+        # Multi-well components (e.g. VialData) register one inventory node per
+        # well under keys like "A1", "B2" etc.  Single-inventory vessels use
+        # the standard "Inventory" key.
+        if hasattr(comp, "internal_inventories") and comp.internal_inventories:
+            for inv_key in comp.internal_inventories:
+                entries.append(
+                    HeatExchangeEntry(
+                        inv_node_id=f"{comp.name}.{inv_key}",
+                        U=comp.heat_transfer_coefficient_value,
+                        contact_area=comp.contact_area,
+                        T_wall=comp.temperature_value,
+                    )
+                )
+        else:
+            entries.append(
+                HeatExchangeEntry(
+                    inv_node_id=f"{comp.name}.Inventory",
+                    U=comp.heat_transfer_coefficient_value,
+                    contact_area=comp.contact_area,
+                    T_wall=comp.temperature_value,
+                )
+            )
+    return entries
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -216,6 +252,7 @@ class Worker:
         self._bpr_entries: list[_BprEntry] = _build_bpr_entries(graph, components)
         self._mfc_entries: list[_MfcEntry] = _build_mfc_entries(graph, components)
         self._pump_entries: list[_PumpEntry] = _build_pump_entries(graph, components)
+        self._heat_exchange_entries: list[HeatExchangeEntry] = _build_heat_exchange_entries(components)
 
         self._t: float = 0.0
         self._hyd_state: HydraulicState | None = None
@@ -314,6 +351,9 @@ class Worker:
 
         # 6. Apply reactions
         apply(self._inv_states, self._reactions_map, self._config.dt)
+
+        # 6.5. Apply wall heat exchange
+        apply_heat_exchange(self._inv_states, self._heat_exchange_entries, self._config.dt)
 
         # 7. Emit replacement pockets from inventories
         emitted = emit(self._inv_states, result.departures, self._port_map)

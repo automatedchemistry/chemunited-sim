@@ -25,7 +25,10 @@ def build_draw(platform) -> None:
         syringe_actual_volume="10 ml",
     )
     platform.add_component(
-        name="liquidrecicly", figure="GlassBottle"
+        name="liquidrecicly", 
+        figure="GlassBottle", 
+        heat_exchange=True, 
+        surface_temperature="315 K"
     )
     platform.add_component(
         name="pump", figure="HPLCPump"
@@ -43,6 +46,9 @@ def build_draw(platform) -> None:
         top_access=2,
         bottom_access=1,
         pressure_access=True,
+        heat_exchange=True, 
+        surface_temperature="315 K",
+        heat_transfer_coefficient ="10 W/(m^2*K)"
     )
     platform.add_component(
         name="bpr", figure="BackPressureRegulator", setpoint="1.2 bar"
