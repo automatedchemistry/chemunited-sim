@@ -257,11 +257,12 @@ def compile_valve(
 def compile_flow_source(
     comp: FlowSourceData,
 ) -> tuple[list[HydraulicNode], list[HydraulicEdge]]:
-    """Compile a flow source into a single boundary node with no internal edges.
+    """Compile a flow source into a passive port node + Inventory node + nozzle edge.
 
-    A flow source has only one hydraulic port (port 1).  If that port is
-    CAPPED, a warning is logged because a capped flow source can never inject
-    flow into the network.
+    Port 1 is passive (boundary=None) — it is solved by the network.
+    The Inventory node carries the FLOW BC that drives fluid through the nozzle.
+    The nozzle (InternalEdge) starts closed; resync_component() propagates its
+    resistance_override each tick after sync_internal_state() opens or closes it.
 
     Parameters
     ----------
@@ -271,7 +272,7 @@ def compile_flow_source(
     Returns
     -------
     tuple[list[HydraulicNode], list[HydraulicEdge]]
-        At most one node; no edges.
+        Two nodes (port + inventory) and one internal nozzle edge.
     """
     nodes: list[HydraulicNode] = []
     port = comp.ports_by_number.get(1)
@@ -287,15 +288,42 @@ def compile_flow_source(
         )
         return nodes, []
 
+    # Port 1 — passive junction node, no boundary condition
     nodes.append(
         HydraulicNode(
             node_id=f"{comp.name}.1",
-            boundary=port.boundary,
+            boundary=port.boundary,  # None
             is_hub=False,
             component=comp.name,
         )
     )
-    return nodes, []
+
+    # Inventory node — FLOW BC drives fluid through the nozzle
+    nodes.append(
+        HydraulicNode(
+            node_id=f"{comp.name}.Inventory",
+            boundary=comp._inventory_bc,
+            is_hub=False,
+            component=comp.name,
+        )
+    )
+
+    # Nozzle edge — JUNCTION, starts closed (resistance_override = R_MAX)
+    nozzle = comp.internal_edges[(1, "Inventory")]
+    edges: list[HydraulicEdge] = [
+        HydraulicEdge(
+            edge_id=f"{comp.name}.1.Inventory",
+            origin_node_id=f"{comp.name}.1",
+            destination_node_id=f"{comp.name}.Inventory",
+            length=0.0,
+            diameter=0.0,
+            role=InternalEdgeRole.JUNCTION,
+            resistance_override=nozzle.resistance_override,
+            component=comp.name,
+            is_external=False,
+        )
+    ]
+    return nodes, edges
 
 
 # ---------------------------------------------------------------------------

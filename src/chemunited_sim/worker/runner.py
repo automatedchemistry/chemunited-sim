@@ -6,7 +6,7 @@ logic lives here.
 
 Operator-splitting order (CLAUDE.md):
   1. solve hydraulics
-  2. update MFC and BPR resistances for next tick
+  2. update pump, MFC and BPR resistances for next tick
   3. advance transport
   4. assimilate
   5. react
@@ -25,6 +25,7 @@ from chemunited_core.components import (
     BackPressureRegulatorData,
     ComponentData,
     MassFlowControllerData,
+    PumpData,
 )
 
 from chemunited_core.figure_registry.pumps import SyringePumpData
@@ -72,6 +73,16 @@ class _MfcEntry:
     edge: HydraulicEdge
 
 
+@dataclass
+class _PumpEntry:
+    """Pre-resolved pump edge metadata for fast per-step resistance update."""
+
+    comp: PumpData
+    upstream_node_id: str
+    downstream_node_id: str
+    edge: HydraulicEdge
+
+
 def _build_bpr_entries(
     graph: HydraulicGraph,
     components: list[ComponentData],
@@ -92,6 +103,30 @@ def _build_bpr_entries(
                 setpoint_pa=comp.setpoint_pa,
                 upstream_node_id=f"{comp.name}.1",
                 downstream_node_id=f"{comp.name}.2",
+            )
+        )
+    return entries
+
+
+def _build_pump_entries(
+    graph: HydraulicGraph,
+    components: list[ComponentData],
+) -> list[_PumpEntry]:
+    """Resolve pump metadata from the compiled graph."""
+    entries: list[_PumpEntry] = []
+    for comp in components:
+        if not isinstance(comp, PumpData):
+            continue
+        edge_id = f"{comp.name}.1.2"
+        edge = graph.edges.get(edge_id)
+        if edge is None:
+            continue
+        entries.append(
+            _PumpEntry(
+                comp=comp,
+                upstream_node_id=f"{comp.name}.1",
+                downstream_node_id=f"{comp.name}.2",
+                edge=edge,
             )
         )
     return entries
@@ -133,11 +168,11 @@ class Worker:
     :meth:`step` (single time step) and :meth:`run` (full simulation) as the
     primary interface.
 
-    **BPR and MFC**: after each hydraulic solve, resistance overrides for BPR
-    and MFC edges are updated from the solved pressures and flows so that the
-    next tick's solve uses the correct values.  BPR uses a proportional model
-    (resistance = excess_dp / Q) that drives upstream pressure toward the
-    setpoint.  MFC uses resistance = dp / setpoint_flow.
+    **Pump, BPR and MFC**: after each hydraulic solve, resistance overrides are
+    updated from the solved pressures so the next tick's solve uses correct
+    values.  Pump uses R = dp/Q (negative when working against back-pressure —
+    active element model).  BPR uses a proportional model that drives upstream
+    pressure toward the setpoint.  MFC uses R = dp / setpoint_flow.
 
     Parameters
     ----------
@@ -180,6 +215,7 @@ class Worker:
         }
         self._bpr_entries: list[_BprEntry] = _build_bpr_entries(graph, components)
         self._mfc_entries: list[_MfcEntry] = _build_mfc_entries(graph, components)
+        self._pump_entries: list[_PumpEntry] = _build_pump_entries(graph, components)
 
         self._t: float = 0.0
         self._hyd_state: HydraulicState | None = None
@@ -222,7 +258,16 @@ class Worker:
         # 1. Solve hydraulics
         hyd_state = solve(self._graph, self._config.viscosity)
 
-        # 2a. Update MFC resistance from this tick's ΔP for the next solve
+        # 2a. Update pump and MFC resistances from this tick's ΔP for the next solve
+        for entry in self._pump_entries:
+            dp = hyd_state.pressures.get(
+                entry.upstream_node_id, 0.0
+            ) - hyd_state.pressures.get(entry.downstream_node_id, 0.0)
+            entry.comp.update_resistance(dp)
+            entry.edge.resistance_override = entry.comp.internal_edges[
+                (1, 2)
+            ].resistance_override
+
         for entry in self._mfc_entries:
             dp = hyd_state.pressures.get(
                 entry.upstream_node_id, 0.0

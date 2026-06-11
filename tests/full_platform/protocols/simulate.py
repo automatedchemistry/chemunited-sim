@@ -61,7 +61,8 @@ class CustomProcess(Process[ProcessConfig]):
         return True
 
     def wait(self, _ctx: NodeExecutionContext) -> bool:
-        self.platform["liquidpump"].put("infuse", rate="3 ml/min", volume="2 ml")
+        self.platform["divertvalve"].put("open", wait_time=20.0)
+        self.platform["liquidpump"].put("infuse", rate="3 ml/min", volume="2 ml", wait_time=10.0)
         self.platform["pump"].put("infuse", rate="0.3 ml/min", volume="0.3 ml")
         self.platform["mfc"].put("set-flow-rate", flowrate="0.5 ml/min")
         self.platform["divertvalve"].put("open", wait_time=20.0)
