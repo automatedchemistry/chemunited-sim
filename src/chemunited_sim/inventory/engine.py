@@ -1,7 +1,7 @@
 """Inventory assimilation and emission engine for chemunited-sim.
 
 ``assimilate`` absorbs arriving pockets into vessel phase inventories and
-updates temperature (volume-weighted blend, instantaneous equilibrium).
+updates temperature (thermal-mass weighted blend n·Cp, instantaneous equilibrium).
 
 ``emit`` draws replacement pockets from vessel inventories for each departing
 transport edge, using the port-access mapping to select the correct phase.
@@ -10,6 +10,7 @@ transport edge, using the port-access mapping to select the correct phase.
 from __future__ import annotations
 
 from chemunited_core.common.enums import PhaseKind
+from chemunited_core.compounds import COMPOUNDS
 from chemunited_core.compounds.entity import IDEAL_GAS_CONSTANT
 from chemunited_core.components.enums import PortAccess
 from loguru import logger
@@ -34,6 +35,16 @@ def _merge_species(target: dict[str, float], incoming: dict[str, float]) -> None
             target[species_id] = target.get(species_id, 0.0) + moles
 
 
+def _thermal_mass(species_moles: dict[str, float], phase_kind: PhaseKind) -> float:
+    """Sum of n_i * Cp_i (J/K) for all tracked species."""
+    phase_str = "liquid" if phase_kind == PhaseKind.LIQUID else "gas"
+    return sum(
+        moles * COMPOUNDS[s].cp(phase_str)
+        for s, moles in species_moles.items()
+        if s in COMPOUNDS
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -55,10 +66,10 @@ def assimilate(
     2. **Volume and species absorption** — add each pocket's volume to the
        matching phase; sum species moles.
 
-    3. **Temperature blend** — volume-weighted average of the vessel's
-       pre-arrival thermal mass and the arriving pockets' thermal mass.
-       Under the instantaneous thermal-equilibrium assumption both phases
-       share the resulting single temperature.
+    3. **Temperature blend** — thermal-mass weighted average (n·Cp) of the
+       vessel and arriving pockets. Falls back to volume-weighted for
+       untracked carrier fluid. Both phases share the resulting temperature
+       (instantaneous equilibrium assumption).
 
     Arrivals for inventory nodes not present in *states* are silently ignored.
 
@@ -103,13 +114,26 @@ def assimilate(
                     pocket.species_moles,
                 )
 
-        # Blend temperature (volume-weighted, instantaneous equilibrium)
+        # Blend temperature — thermal-mass weighted (n·Cp), volume fallback for untracked carrier
         if v_arriving > 0.0:
-            t_arriving = sum(p.temperature * p.volume for p in pockets) / v_arriving
-            total = v_before + v_arriving
-            arrival_state.temperature = (
-                v_before * arrival_state.temperature + v_arriving * t_arriving
-            ) / total
+            c_before = (
+                _thermal_mass(arrival_state.liq_species_moles, PhaseKind.LIQUID)
+                + _thermal_mass(arrival_state.gas_species_moles, PhaseKind.GAS)
+            )
+            c_arriving = sum(_thermal_mass(p.species_moles, p.phase_kind) for p in pockets)
+            total_c = c_before + c_arriving
+
+            if total_c > 0.0:
+                h_arriving = sum(_thermal_mass(p.species_moles, p.phase_kind) * p.temperature for p in pockets)
+                arrival_state.temperature = (c_before * arrival_state.temperature + h_arriving) / total_c
+            else:
+                logger.warning(
+                    "No tracked species in vessel {} or arriving pockets — falling back to volume-weighted temperature blend.",
+                    inv_node_id,
+                )
+                total = v_before + v_arriving
+                t_arriving = sum(p.temperature * p.volume for p in pockets) / v_arriving
+                arrival_state.temperature = (v_before * arrival_state.temperature + v_arriving * t_arriving) / total
 
 
 def emit(

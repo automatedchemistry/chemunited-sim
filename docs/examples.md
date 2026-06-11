@@ -8,7 +8,7 @@ Draw project.
 Run it from the repository root:
 
 ```powershell
-.\.venv\Scripts\python.exe examples\full_platform.py
+.\.venv\Scripts\python.exe tests\flow_platform
 ```
 
 This example demonstrates:
