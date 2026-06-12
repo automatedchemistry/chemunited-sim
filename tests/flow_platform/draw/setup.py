@@ -58,9 +58,10 @@ def build_draw(platform) -> None:
     )
     platform.add_component(name="divertvalve", figure="SolenoidValve2Way")
     platform.add_component(name="mfc", figure="MFCComponent")
+    platform.add_component(name="chiller", figure="TemperatureControl")
 
     platform["reactor"].internal_inventory.liq_content = VolumeContentBase(
-        phase_kind="LIQUID",
+        phase_kind="LIQUID",  # type: ignore
         volume=3.0e-6,
         initial_species={"reagent_a": 1.0e-4, "solvent": 3.4e-2},
         initial_pressure=202650.0,
@@ -68,7 +69,7 @@ def build_draw(platform) -> None:
     )
 
     platform["reactor"].internal_inventory.gas_content = VolumeContentBase(
-        phase_kind="GAS",
+        phase_kind="GAS",  # type: ignore
         volume=7.0e-6,
         initial_species={"nitrogen": 4.3e-1},
         initial_pressure=202650.0,
@@ -76,13 +77,13 @@ def build_draw(platform) -> None:
     )
 
     platform["liquidpump"].internal_inventory.liq_content = VolumeContentBase(
-        phase_kind="LIQUID",
+        phase_kind="LIQUID",  # type: ignore
         volume=10e-6,
         initial_species={"reagent_a": 1e-4, "solvent": 3.4e-2},
     )
 
     platform["liquidrecicly"].internal_inventory.liq_content = VolumeContentBase(
-        phase_kind="LIQUID",
+        phase_kind="LIQUID",  # type: ignore
         volume=10e-6,
         initial_species={"solvent": 3.4e-2},
         initial_pressure=101325.0,
@@ -90,7 +91,7 @@ def build_draw(platform) -> None:
     )
 
     platform["liquidrecicly"].internal_inventory.gas_content = VolumeContentBase(
-        phase_kind="GAS",
+        phase_kind="GAS",  # type: ignore
         volume=0.0,
         initial_species={},
         initial_pressure=101325.0,
@@ -123,6 +124,10 @@ def build_draw(platform) -> None:
     )
     platform.add_connection(
         "divertvalve", "wastesink", 2, 1, length="14 cm", diameter="1.5 mm"
+    )
+
+    platform.add_connection(
+        "chiller", "reactor", 1, 4, classification="heat"
     )
 
     # ── Reactions ──────────────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ from chemunited_core.components import (
     PressureControlMode,
 )
 from chemunited_core.connections import EdgeData, EdgeMode
+from chemunited_core.figure_registry import COMPONENTS
 from chemunited_core.utils.internal_quantity import ChemUnitQuantity
 
 from chemunited_sim.adapter import compile_graph
@@ -380,3 +381,37 @@ def test_bpr_closed_blocks_flow():
     w = Worker(graph, components, cfg)
     w.step()
     assert abs(w.hyd_state.flows.get("bpr.1.2", 0.0)) < 1e-6
+
+
+def test_worker_heat_connection_uses_live_controller_temperature():
+    controller_defn = COMPONENTS["TemperatureControl"]
+    vessel_defn = COMPONENTS["GlassBottle"]
+    controller = controller_defn.data_class.from_mode(
+        controller_defn.mode_class(name="chiller")
+    )
+    vessel = vessel_defn.data_class.from_mode(
+        vessel_defn.mode_class(
+            name="reactor",
+            heat_exchange=True,
+            heat_transfer_coefficient=ChemUnitQuantity("0.01 W/(m^2*K)"),
+            surface_temperature=ChemUnitQuantity("350 K"),
+        )
+    )
+    vessel.internal_inventory.gas_content.initial_species = {"air": 1.0e-5}
+    heat_link = EdgeData.from_mode(
+        EdgeMode(
+            name="chiller_reactor_heat",
+            origin="chiller",
+            origin_port=1,
+            destination="reactor",
+            destination_port=2,
+            classification=ConnectionType.HEAT,
+        )
+    )
+    graph = compile_graph([controller, vessel], [heat_link])
+    worker = Worker(graph, [controller, vessel], SimConfig(dt=0.1, t_end=0.1))
+
+    controller.apply("set_temperature", temp=ChemUnitQuantity("10 C"))
+    worker.step()
+
+    assert worker.inv_states["reactor.Inventory"].temperature < 298.15

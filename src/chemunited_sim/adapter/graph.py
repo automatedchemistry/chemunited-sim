@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 
 from chemunited_core.common.enums import ConnectionType
-from chemunited_core.components import ComponentData
+from chemunited_core.components import ComponentData, NeutralComponentData
 from chemunited_core.components.enums import InternalEdgeRole
 from chemunited_core.components.internals import InventoryNode
 from chemunited_core.components.plugflow import PlugFlowComponentData
@@ -19,7 +19,7 @@ from chemunited_core.connections.edge import EdgeData
 from loguru import logger
 
 from .compilers import _COMPILERS, compile_component
-from .models import HydraulicEdge, HydraulicGraph, HydraulicNode
+from .models import HeatLink, HydraulicEdge, HydraulicGraph, HydraulicNode
 
 
 def resync_component(graph: HydraulicGraph, comp: ComponentData) -> None:
@@ -37,6 +37,73 @@ def resync_component(graph: HydraulicGraph, comp: ComponentData) -> None:
         hydraulic_edge = graph.edges.get(edge_id)
         if hydraulic_edge is not None:
             hydraulic_edge.resistance_override = internal_edge.resistance_override
+
+
+def _port_category(
+    comp: ComponentData, port_number: int | str
+) -> ConnectionType | None:
+    port = comp.ports_by_number.get(port_number)
+    return None if port is None else port.category
+
+
+def _is_heat_provider(comp: ComponentData) -> bool:
+    return isinstance(comp, NeutralComponentData)
+
+
+def _is_heat_target(comp: ComponentData) -> bool:
+    return bool(getattr(comp, "heat_exchange", False)) and not _is_heat_provider(comp)
+
+
+def _compile_heat_link(
+    edge_data: EdgeData,
+    components_by_name: dict[str, ComponentData],
+    linked_targets: set[str],
+) -> HeatLink:
+    endpoints = [
+        (edge_data.origin, edge_data.origin_port),
+        (edge_data.destination, edge_data.destination_port),
+    ]
+    resolved: list[tuple[ComponentData, int | str]] = []
+
+    for comp_name, port_number in endpoints:
+        comp = components_by_name.get(comp_name)
+        if comp is None:
+            raise ValueError(
+                f"HEAT edge '{edge_data.name}' references unknown component "
+                f"'{comp_name}'"
+            )
+        if _port_category(comp, port_number) != ConnectionType.HEAT:
+            raise ValueError(
+                f"HEAT edge '{edge_data.name}' endpoint "
+                f"'{comp_name}.{port_number}' is not a HEAT port"
+            )
+        resolved.append((comp, port_number))
+
+    providers = [(comp, port) for comp, port in resolved if _is_heat_provider(comp)]
+    targets = [(comp, port) for comp, port in resolved if _is_heat_target(comp)]
+
+    if len(providers) != 1 or len(targets) != 1:
+        names = ", ".join(f"{comp.name}.{port}" for comp, port in resolved)
+        raise ValueError(
+            f"HEAT edge '{edge_data.name}' must connect exactly one thermal "
+            f"controller to one heat-enabled target; got {names}"
+        )
+
+    provider, provider_port = providers[0]
+    target, target_port = targets[0]
+    if target.name in linked_targets:
+        raise ValueError(
+            f"Component '{target.name}' has multiple HEAT controllers; only one "
+            "thermal provider per target is supported"
+        )
+    linked_targets.add(target.name)
+
+    return HeatLink(
+        provider_component=provider.name,
+        provider_port=provider_port,
+        target_component=target.name,
+        target_port=target_port,
+    )
 
 
 def compile_graph(
@@ -92,6 +159,7 @@ def compile_graph(
     all_nodes: dict[str, HydraulicNode] = {}
     all_edges: dict[str, HydraulicEdge] = {}
     all_inventory: dict[str, InventoryNode] = {}
+    components_by_name: dict[str, ComponentData] = {}
 
     # ------------------------------------------------------------------
     # Pass 1: component compilers
@@ -100,6 +168,7 @@ def compile_graph(
         if comp.name in seen_names:
             raise ValueError(f"Duplicate component name '{comp.name}'")
         seen_names.add(comp.name)
+        components_by_name[comp.name] = comp
 
         comp.apply_air_defaults()
 
@@ -112,7 +181,10 @@ def compile_graph(
         for node in nodes:
             all_nodes[node.node_id] = node
         for edge in comp_edges:
-            if isinstance(comp, PlugFlowComponentData) and edge.role == InternalEdgeRole.TRANSPORT:
+            if (
+                isinstance(comp, PlugFlowComponentData)
+                and edge.role == InternalEdgeRole.TRANSPORT
+            ):
                 edge.content = list(comp.content)
             all_edges[edge.edge_id] = edge
 
@@ -168,10 +240,23 @@ def compile_graph(
         )
 
     # ------------------------------------------------------------------
+    # Pass 3: heat links
+    # ------------------------------------------------------------------
+    heat_links: list[HeatLink] = []
+    linked_heat_targets: set[str] = set()
+    for edge_data in edges:
+        if edge_data.classification != ConnectionType.HEAT:
+            continue
+        heat_links.append(
+            _compile_heat_link(edge_data, components_by_name, linked_heat_targets)
+        )
+
+    # ------------------------------------------------------------------
     # Assembly
     # ------------------------------------------------------------------
     return HydraulicGraph(
         nodes=all_nodes,
         edges=all_edges,
         inventory_nodes=all_inventory,
+        heat_links=heat_links,
     )

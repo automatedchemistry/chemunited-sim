@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict, deque
+from dataclasses import dataclass
 
 from chemunited_core.common.constant import R_MAX_HYDRAULIC
 from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components.enums import InternalEdgeRole
+from chemunited_core.compounds import COMPOUNDS
 from chemunited_core.compounds.entity import IDEAL_GAS_CONSTANT
 from loguru import logger
 
@@ -32,6 +34,8 @@ from .models import Pocket, TransportResult, TransportState
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+_CP_CACHE: dict[tuple[str, PhaseKind], float] = {}
 
 
 def _scale_pocket(pocket: Pocket, fraction: float) -> Pocket:
@@ -388,6 +392,76 @@ def _process_hub(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TransportHeatExchangeEntry:
+    """Wall heat-exchange parameters for one transport edge."""
+
+    edge_id: str
+    U: float
+    diameter: float
+    T_wall: float
+
+
+def _pocket_thermal_mass(pocket: Pocket) -> float:
+    """Return the tracked species thermal mass for a pocket in J/K."""
+    total = 0.0
+    phase = pocket.phase_kind
+    phase_name = "liquid" if phase == PhaseKind.LIQUID else "gas"
+    for species_id, moles in pocket.species_moles.items():
+        if species_id not in COMPOUNDS:
+            continue
+        key = (species_id, phase)
+        cp = _CP_CACHE.get(key)
+        if cp is None:
+            cp = COMPOUNDS[species_id].cp(phase_name)
+            _CP_CACHE[key] = cp
+        total += moles * cp
+    return total
+
+
+def _heat_pocket(
+    pocket: Pocket, T_wall: float, rate_factor: float
+) -> Pocket:
+    if abs(pocket.temperature - T_wall) <= 1.0e-12:
+        return pocket
+
+    c_thermal = _pocket_thermal_mass(pocket)
+    if c_thermal <= 0.0:
+        return pocket
+
+    exponent = -(rate_factor * pocket.volume / c_thermal)
+    temperature = T_wall + (pocket.temperature - T_wall) * math.exp(exponent)
+    return Pocket(
+        phase_kind=pocket.phase_kind,
+        volume=pocket.volume,
+        species_moles=dict(pocket.species_moles),
+        temperature=temperature,
+        pressure=pocket.pressure,
+    )
+
+
+def apply_transport_heat_exchange(
+    state: TransportState,
+    entries: list[TransportHeatExchangeEntry],
+    dt: float,
+) -> None:
+    """Apply wall heat exchange to pockets currently inside transport edges.
+
+    Each pocket is heated independently by a plug-flow UA model with
+    cylindrical area ``A = (4 / diameter) * pocket.volume``.
+    """
+    for entry in entries:
+        if entry.U <= 0.0 or entry.diameter <= 0.0:
+            continue
+        queue = state.edge_queues.get(entry.edge_id)
+        if not queue:
+            continue
+        rate_factor = entry.U * (4.0 / entry.diameter) * dt
+        state.edge_queues[entry.edge_id] = deque(
+            _heat_pocket(pocket, entry.T_wall, rate_factor) for pocket in queue
+        )
 
 
 def advance(

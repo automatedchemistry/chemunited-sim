@@ -8,10 +8,16 @@ from collections import deque
 import pytest
 from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components.enums import InternalEdgeRole
+from chemunited_core.compounds import COMPOUNDS
 
 from chemunited_sim.adapter.models import HydraulicEdge, HydraulicGraph, HydraulicNode
 from chemunited_sim.hydraulics.models import HydraulicState
-from chemunited_sim.transport.engine import advance, inject
+from chemunited_sim.transport.engine import (
+    TransportHeatExchangeEntry,
+    advance,
+    apply_transport_heat_exchange,
+    inject,
+)
 from chemunited_sim.transport.models import Pocket, TransportState
 
 
@@ -170,3 +176,33 @@ def test_inject_pads_underfilled_transport_edge_with_air_carrier() -> None:
     assert queue[0].pressure == pytest.approx(150_000.0)
     expected_volume = math.pi * (graph.edges["edge"].diameter / 2.0) ** 2
     assert queue[0].volume == pytest.approx(expected_volume)
+
+
+def test_transport_heat_exchange_applies_stable_plug_flow_ua_model() -> None:
+    pocket = Pocket(
+        phase_kind=PhaseKind.GAS,
+        volume=1.0e-6,
+        species_moles={"air": 2.0e-5},
+        temperature=300.0,
+        pressure=101_325.0,
+    )
+    state = TransportState(edge_queues={"reactor.1.2": deque([pocket])})
+    entry = TransportHeatExchangeEntry(
+        edge_id="reactor.1.2",
+        U=10.0,
+        diameter=2.0e-3,
+        T_wall=350.0,
+    )
+
+    apply_transport_heat_exchange(state, [entry], dt=0.5)
+
+    c_thermal = pocket.species_moles["air"] * COMPOUNDS["air"].cp("gas")
+    area = (4.0 / entry.diameter) * pocket.volume
+    expected = entry.T_wall + (pocket.temperature - entry.T_wall) * math.exp(
+        -(entry.U * area / c_thermal) * 0.5
+    )
+    heated = state.edge_queues["reactor.1.2"][0]
+    assert heated.temperature == pytest.approx(expected)
+    assert heated.volume == pytest.approx(pocket.volume)
+    assert heated.pressure == pytest.approx(pocket.pressure)
+    assert heated.species_moles == pocket.species_moles

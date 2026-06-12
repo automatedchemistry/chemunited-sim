@@ -20,6 +20,20 @@ from chemunited_core.compounds.pockets import VolumeContentBase
 
 
 @dataclass(frozen=True)
+class HeatLink:
+    """Thermal-control connection between a provider and a heat-enabled target.
+
+    The provider is a neutral thermal controller (for example a chiller).  The
+    target is a component whose wall/surface temperature drives heat exchange.
+    """
+
+    provider_component: str
+    provider_port: int | str
+    target_component: str
+    target_port: int | str
+
+
+@dataclass(frozen=True)
 class HydraulicNode:
     """A single node in the flat hydraulic network graph.
 
@@ -113,3 +127,4 @@ class HydraulicGraph:
     nodes: dict[str, HydraulicNode] = field(default_factory=dict)
     edges: dict[str, HydraulicEdge] = field(default_factory=dict)
     inventory_nodes: dict[str, InventoryNode] = field(default_factory=dict)
+    heat_links: list[HeatLink] = field(default_factory=list)

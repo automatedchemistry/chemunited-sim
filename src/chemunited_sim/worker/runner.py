@@ -26,6 +26,7 @@ from chemunited_core.components import (
     BackPressureRegulatorData,
     ComponentData,
     MassFlowControllerData,
+    PlugFlowComponentData,
     PumpData,
     VesselComponentData,
 )
@@ -49,7 +50,12 @@ from ..inventory.source_map import SourceMap, build_source_map
 from ..reactions.engine import apply
 from ..reactions.models import ReactionsMap
 from ..recorder.writer import Recorder
-from ..transport.engine import advance, inject
+from ..transport.engine import (
+    TransportHeatExchangeEntry,
+    advance,
+    apply_transport_heat_exchange,
+    inject,
+)
 from ..transport.initialiser import build_initial_state
 from ..transport.models import TransportState
 from .config import SimConfig
@@ -87,6 +93,26 @@ class _PumpEntry:
     comp: PumpData
     upstream_node_id: str
     downstream_node_id: str
+    edge: HydraulicEdge
+
+
+@dataclass
+class _VesselHeatEntry:
+    """Live vessel heat-exchange metadata.
+
+    The wall temperature is intentionally not cached here; HEAT links may point
+    at controllers whose setpoint changes during the run.
+    """
+
+    comp: ComponentData
+    inv_node_id: str
+
+
+@dataclass
+class _TransportHeatEntry:
+    """Live transport-edge heat-exchange metadata."""
+
+    comp: ComponentData
     edge: HydraulicEdge
 
 
@@ -163,11 +189,11 @@ def _build_mfc_entries(
     return entries
 
 
-def _build_heat_exchange_entries(
+def _build_vessel_heat_entries(
     components: list[ComponentData],
-) -> list[HeatExchangeEntry]:
-    """Build heat exchange entries for all vessels with heat_exchange=True."""
-    entries: list[HeatExchangeEntry] = []
+) -> list[_VesselHeatEntry]:
+    """Build live heat-exchange entries for all vessels."""
+    entries: list[_VesselHeatEntry] = []
     for comp in components:
         if not isinstance(comp, VesselComponentData):
             continue
@@ -179,23 +205,110 @@ def _build_heat_exchange_entries(
         if hasattr(comp, "internal_inventories") and comp.internal_inventories:
             for inv_key in comp.internal_inventories:
                 entries.append(
-                    HeatExchangeEntry(
+                    _VesselHeatEntry(
+                        comp=comp,
                         inv_node_id=f"{comp.name}.{inv_key}",
-                        U=comp.heat_transfer_coefficient_value,
-                        contact_area=comp.contact_area,
-                        T_wall=comp.temperature_value,
                     )
                 )
         else:
             entries.append(
-                HeatExchangeEntry(
+                _VesselHeatEntry(
+                    comp=comp,
                     inv_node_id=f"{comp.name}.Inventory",
-                    U=comp.heat_transfer_coefficient_value,
-                    contact_area=comp.contact_area,
-                    T_wall=comp.temperature_value,
                 )
             )
     return entries
+
+
+def _build_transport_heat_entries(
+    graph: HydraulicGraph,
+    components: list[ComponentData],
+) -> list[_TransportHeatEntry]:
+    """Build live heat-exchange entries for plug-flow reactor edges."""
+    entries: list[_TransportHeatEntry] = []
+    for comp in components:
+        if not isinstance(comp, PlugFlowComponentData):
+            continue
+        if not getattr(comp, "heat_exchange", False):
+            continue
+        edge = graph.edges.get(f"{comp.name}.1.2")
+        if edge is None:
+            continue
+        entries.append(_TransportHeatEntry(comp=comp, edge=edge))
+    return entries
+
+
+def _build_heat_provider_map(
+    graph: HydraulicGraph,
+    components_by_name: dict[str, ComponentData],
+) -> dict[str, ComponentData]:
+    """Return target component name -> thermal provider component."""
+    providers: dict[str, ComponentData] = {}
+    for link in graph.heat_links:
+        provider = components_by_name.get(link.provider_component)
+        target = components_by_name.get(link.target_component)
+        if provider is None or target is None:
+            continue
+        providers[target.name] = provider
+    return providers
+
+
+def _temperature_value(comp: ComponentData) -> float:
+    try:
+        return float(getattr(comp, "temperature_value"))
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Component '{comp.name}' temperature_value is not numeric"
+        ) from None
+
+
+def _wall_temperature(
+    comp: ComponentData,
+    heat_provider_by_target: dict[str, ComponentData],
+) -> float:
+    source = heat_provider_by_target.get(comp.name, comp)
+    if not hasattr(source, "temperature_value"):
+        raise ValueError(
+            f"Component '{source.name}' does not expose temperature_value for "
+            f"heat target '{comp.name}'"
+        )
+    return _temperature_value(source)
+
+
+def _resolve_vessel_heat_entries(
+    entries: list[_VesselHeatEntry],
+    heat_provider_by_target: dict[str, ComponentData],
+) -> list[HeatExchangeEntry]:
+    resolved: list[HeatExchangeEntry] = []
+    for entry in entries:
+        comp = entry.comp
+        resolved.append(
+            HeatExchangeEntry(
+                inv_node_id=entry.inv_node_id,
+                U=float(getattr(comp, "heat_transfer_coefficient_value")),
+                contact_area=float(getattr(comp, "contact_area")),
+                T_wall=_wall_temperature(comp, heat_provider_by_target),
+            )
+        )
+    return resolved
+
+
+def _resolve_transport_heat_entries(
+    entries: list[_TransportHeatEntry],
+    heat_provider_by_target: dict[str, ComponentData],
+) -> list[TransportHeatExchangeEntry]:
+    resolved: list[TransportHeatExchangeEntry] = []
+    for entry in entries:
+        comp = entry.comp
+        resolved.append(
+            TransportHeatExchangeEntry(
+                edge_id=entry.edge.edge_id,
+                U=float(getattr(comp, "heat_transfer_coefficient_value")),
+                diameter=entry.edge.diameter,
+                T_wall=_wall_temperature(comp, heat_provider_by_target),
+            )
+        )
+    return resolved
 
 
 def _syringe_phase(comp: SyringePumpData) -> PhaseKind:
@@ -368,6 +481,10 @@ class Worker:
         self._config = config
         self._reactions_map: ReactionsMap = reactions_map or {}
         self._recorder = recorder
+        self._components_by_name = {comp.name: comp for comp in components}
+        self._heat_provider_by_target = _build_heat_provider_map(
+            graph, self._components_by_name
+        )
 
         # Initialise sub-module states
         self._transport_state: TransportState = build_initial_state(graph)
@@ -385,8 +502,33 @@ class Worker:
         self._bpr_entries: list[_BprEntry] = _build_bpr_entries(graph, components)
         self._mfc_entries: list[_MfcEntry] = _build_mfc_entries(graph, components)
         self._pump_entries: list[_PumpEntry] = _build_pump_entries(graph, components)
-        self._heat_exchange_entries: list[HeatExchangeEntry] = (
-            _build_heat_exchange_entries(components)
+        vessel_heat_entries = _build_vessel_heat_entries(components)
+        self._dynamic_vessel_heat_entries = [
+            entry
+            for entry in vessel_heat_entries
+            if entry.comp.name in self._heat_provider_by_target
+        ]
+        self._static_vessel_heat_entries = _resolve_vessel_heat_entries(
+            [
+                entry
+                for entry in vessel_heat_entries
+                if entry.comp.name not in self._heat_provider_by_target
+            ],
+            self._heat_provider_by_target,
+        )
+        transport_heat_entries = _build_transport_heat_entries(graph, components)
+        self._dynamic_transport_heat_entries = [
+            entry
+            for entry in transport_heat_entries
+            if entry.comp.name in self._heat_provider_by_target
+        ]
+        self._static_transport_heat_entries = _resolve_transport_heat_entries(
+            [
+                entry
+                for entry in transport_heat_entries
+                if entry.comp.name not in self._heat_provider_by_target
+            ],
+            self._heat_provider_by_target,
         )
 
         self._t: float = 0.0
@@ -478,10 +620,27 @@ class Worker:
                 self._t, hyd_state, self._transport_state, self._inv_states
             )
 
-        # 4. Advance transport
+        # 4. Apply plug-flow wall heat exchange before moving pockets.
+        transport_heat_entries = self._static_transport_heat_entries
+        if self._dynamic_transport_heat_entries:
+            transport_heat_entries = (
+                transport_heat_entries
+                + _resolve_transport_heat_entries(
+                    self._dynamic_transport_heat_entries,
+                    self._heat_provider_by_target,
+                )
+            )
+        if transport_heat_entries:
+            apply_transport_heat_exchange(
+                self._transport_state,
+                transport_heat_entries,
+                self._config.dt,
+            )
+
+        # 5. Advance transport
         result = advance(self._graph, hyd_state, self._transport_state, self._config.dt)
 
-        # 5. Assimilate arriving pockets into inventories
+        # 6. Assimilate arriving pockets into inventories
         assimilate(
             self._inv_states,
             result.arrivals,
@@ -490,15 +649,24 @@ class Worker:
         )
         _clamp_syringe_inventory_capacity(self._source_map, self._inv_states)
 
-        # 6. Apply reactions
+        # 7. Apply reactions
         apply(self._inv_states, self._reactions_map, self._config.dt)
 
-        # 6.5. Apply wall heat exchange
-        apply_heat_exchange(
-            self._inv_states, self._heat_exchange_entries, self._config.dt
-        )
+        # 7.5. Apply vessel wall heat exchange
+        vessel_heat_entries = self._static_vessel_heat_entries
+        if self._dynamic_vessel_heat_entries:
+            vessel_heat_entries = vessel_heat_entries + _resolve_vessel_heat_entries(
+                self._dynamic_vessel_heat_entries,
+                self._heat_provider_by_target,
+            )
+        if vessel_heat_entries:
+            apply_heat_exchange(
+                self._inv_states,
+                vessel_heat_entries,
+                self._config.dt,
+            )
 
-        # 7. Emit replacement pockets from inventories
+        # 8. Emit replacement pockets from inventories
         emitted = emit(
             self._inv_states,
             result.departures,
@@ -506,7 +674,7 @@ class Worker:
             self._variable_volume_inventory_ids,
         )
 
-        # 7.5. Emit from FlowSource boundary components (infinite or finite syringe)
+        # 8.5. Emit from FlowSource boundary components (infinite or finite syringe)
         source_emitted = emit_from_sources(
             self._source_map,
             self._graph,
@@ -515,12 +683,12 @@ class Worker:
             self._config.dt,
         )
 
-        # 8. Inject emitted pockets into transport queues
+        # 9. Inject emitted pockets into transport queues
         self._transport_state = inject(
             result.next_state, {**emitted, **source_emitted}, hyd_state, self._graph
         )
 
-        # 9. Advance time
+        # 10. Advance time
         self._t += self._config.dt
         self._hyd_state = hyd_state
 

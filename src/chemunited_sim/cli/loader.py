@@ -125,7 +125,7 @@ def load_project(path: Path) -> ProjectState:
     )
 
     logger.debug("Compiling hydraulic graph")
-    graph = compile_graph(builder.hydraulic_components, builder.edges)
+    graph = compile_graph(builder.components, builder.edges)
 
     if hasattr(setup_module, "build_graph_patch"):
         logger.debug("Applying build_graph_patch()")
