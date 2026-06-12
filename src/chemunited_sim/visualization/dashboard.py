@@ -9,8 +9,9 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Iterable, TypedDict
 
+from ..adapter.models import HydraulicGraph
 from .pyvis_export import NoSnapshotsError, SnapshotReadError
 
 _PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
@@ -88,7 +89,11 @@ class ChartSpec:
         }
 
 
-def render_dashboard_html(db_path: str | os.PathLike) -> str:
+def render_dashboard_html(
+    db_path: str | os.PathLike,
+    graph: HydraulicGraph | None = None,
+    components: Iterable[Any] | None = None,
+) -> str:
     """Read all recorded time series from *db_path* and return dashboard HTML."""
     path = Path(db_path)
     uri = f"file:{path}?mode=ro"
@@ -122,6 +127,8 @@ def render_dashboard_html(db_path: str | os.PathLike) -> str:
         species_moles,
         cell_temps,
         cell_profiles,
+        graph=graph,
+        components=components,
     )
 
 
@@ -384,6 +391,283 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Element grouping
+# ---------------------------------------------------------------------------
+
+
+def _build_element_payload(
+    *,
+    node_pressures: dict[str, list],
+    edge_flows: dict[str, list],
+    inv_states: dict[str, list],
+    species_moles: dict[str, dict[str, list]],
+    cell_temps: dict[str, list],
+    cell_profiles: dict[str, Any],
+    graph: HydraulicGraph | None,
+    components: Iterable[Any] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    component_types = {
+        str(comp.name): type(comp).__name__
+        for comp in (components or [])
+        if hasattr(comp, "name")
+    }
+    nodes_by_component: dict[str, set[str]] = defaultdict(set)
+    inventory_by_component: dict[str, set[str]] = defaultdict(set)
+    edges_by_component: dict[str, set[str]] = defaultdict(set)
+
+    if graph is not None:
+        for node_id, node in graph.nodes.items():
+            comp = node.component or _component_from_node_id(node_id)
+            if comp:
+                nodes_by_component[comp].add(node_id)
+        for inv_id in graph.inventory_nodes:
+            comp = _component_from_node_id(inv_id)
+            if comp:
+                inventory_by_component[comp].add(inv_id)
+                nodes_by_component[comp].add(inv_id)
+        for edge_id, edge in graph.edges.items():
+            comps = {
+                graph.nodes[node_id].component
+                for node_id in (edge.origin_node_id, edge.destination_node_id)
+                if node_id in graph.nodes and graph.nodes[node_id].component
+            }
+            if edge.component:
+                comps.add(edge.component)
+            for comp in comps:
+                edges_by_component[str(comp)].add(edge_id)
+    else:
+        for node_id in set(node_pressures) | set(inv_states):
+            comp = _component_from_node_id(node_id)
+            if comp:
+                nodes_by_component[comp].add(node_id)
+            if node_id.endswith(".Inventory") and comp:
+                inventory_by_component[comp].add(node_id)
+        for edge_id in set(edge_flows) | set(cell_temps):
+            for comp in _components_from_edge_id(edge_id):
+                edges_by_component[comp].add(edge_id)
+
+    component_ids = (
+        set(component_types)
+        | set(nodes_by_component)
+        | set(inventory_by_component)
+        | set(edges_by_component)
+    )
+    components_payload = [
+        _component_payload(
+            component_id=component_id,
+            component_type=component_types.get(component_id, "component"),
+            node_ids=sorted(nodes_by_component.get(component_id, set())),
+            inventory_ids=sorted(inventory_by_component.get(component_id, set())),
+            edge_ids=sorted(edges_by_component.get(component_id, set())),
+            node_pressures=node_pressures,
+            edge_flows=edge_flows,
+            inv_states=inv_states,
+            species_moles=species_moles,
+            cell_temps=cell_temps,
+        )
+        for component_id in sorted(component_ids)
+    ]
+
+    profile_by_edge = {edge["edgeId"]: edge for edge in cell_profiles.get("edges", [])}
+    edge_ids = set(edge_flows) | set(cell_temps) | set(profile_by_edge)
+    if graph is not None:
+        edge_ids.update(graph.edges)
+    edges_payload = [
+        _edge_payload(
+            edge_id=edge_id,
+            graph=graph,
+            node_pressures=node_pressures,
+            edge_flows=edge_flows,
+            cell_temps=cell_temps,
+            cell_profile=profile_by_edge.get(edge_id),
+        )
+        for edge_id in sorted(edge_ids)
+    ]
+    return {"components": components_payload, "edges": edges_payload}
+
+
+def _component_payload(
+    *,
+    component_id: str,
+    component_type: str,
+    node_ids: list[str],
+    inventory_ids: list[str],
+    edge_ids: list[str],
+    node_pressures: dict[str, list],
+    edge_flows: dict[str, list],
+    inv_states: dict[str, list],
+    species_moles: dict[str, dict[str, list]],
+    cell_temps: dict[str, list],
+) -> dict[str, Any]:
+    groups: list[dict[str, Any]] = []
+    pressure_traces = [
+        _trace_payload(node_id, [(t, p) for t, p in node_pressures[node_id]])
+        for node_id in node_ids
+        if node_id in node_pressures
+    ]
+    if pressure_traces:
+        groups.append(
+            _signal_group("Node pressures", "Pressure (bar)", pressure_traces)
+        )
+
+    inv_pressure_traces = [
+        _trace_payload(inv_id, [(t, p) for t, p, _ in inv_states[inv_id]])
+        for inv_id in inventory_ids
+        if inv_id in inv_states
+    ]
+    if inv_pressure_traces:
+        groups.append(
+            _signal_group("Inventory pressures", "Pressure (bar)", inv_pressure_traces)
+        )
+
+    inv_temperature_traces = [
+        _trace_payload(inv_id, [(t, temp) for t, _, temp in inv_states[inv_id]])
+        for inv_id in inventory_ids
+        if inv_id in inv_states
+    ]
+    if inv_temperature_traces:
+        groups.append(
+            _signal_group(
+                "Inventory temperatures", "Temperature (K)", inv_temperature_traces
+            )
+        )
+
+    species_traces = []
+    for inv_id in inventory_ids:
+        prefix = f"{inv_id} / "
+        for group_key, species_dict in sorted(species_moles.items()):
+            if not group_key.startswith(prefix):
+                continue
+            phase = group_key.removeprefix(prefix)
+            for species_id, points in sorted(species_dict.items()):
+                species_traces.append(_trace_payload(f"{phase} / {species_id}", points))
+    if species_traces:
+        groups.append(_signal_group("Inventory species", "Moles (mol)", species_traces))
+
+    flow_traces = [
+        _trace_payload(edge_id, edge_flows[edge_id])
+        for edge_id in edge_ids
+        if edge_id in edge_flows
+    ]
+    if flow_traces:
+        groups.append(_signal_group("Related edge flows", "Flow (mL/min)", flow_traces))
+
+    temp_traces = [
+        _trace_payload(edge_id, cell_temps[edge_id])
+        for edge_id in edge_ids
+        if edge_id in cell_temps
+    ]
+    if temp_traces:
+        groups.append(
+            _signal_group("Related edge temperatures", "Temperature (K)", temp_traces)
+        )
+
+    return {
+        "id": component_id,
+        "type": component_type,
+        "nodes": node_ids,
+        "inventories": inventory_ids,
+        "edges": edge_ids,
+        "signals": groups,
+    }
+
+
+def _edge_payload(
+    *,
+    edge_id: str,
+    graph: HydraulicGraph | None,
+    node_pressures: dict[str, list],
+    edge_flows: dict[str, list],
+    cell_temps: dict[str, list],
+    cell_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    edge = graph.edges.get(edge_id) if graph is not None else None
+    origin = edge.origin_node_id if edge is not None else None
+    destination = edge.destination_node_id if edge is not None else None
+    groups = []
+    if edge_id in edge_flows:
+        groups.append(
+            _signal_group(
+                "Flow rate",
+                "Flow (mL/min)",
+                [_trace_payload(edge_id, edge_flows[edge_id])],
+            )
+        )
+    if edge_id in cell_temps:
+        groups.append(
+            _signal_group(
+                "Average cell temperature",
+                "Temperature (K)",
+                [_trace_payload(edge_id, cell_temps[edge_id])],
+            )
+        )
+    endpoint_traces = [
+        _trace_payload(node_id, node_pressures[node_id])
+        for node_id in (origin, destination)
+        if node_id is not None and node_id in node_pressures
+    ]
+    if endpoint_traces:
+        groups.append(
+            _signal_group("Endpoint pressures", "Pressure (bar)", endpoint_traces)
+        )
+
+    return {
+        "id": edge_id,
+        "role": edge.role.name if edge is not None else "recorded",
+        "origin": origin,
+        "destination": destination,
+        "component": edge.component if edge is not None else None,
+        "external": bool(edge.is_external) if edge is not None else None,
+        "length": edge.length if edge is not None else None,
+        "diameter": edge.diameter if edge is not None else None,
+        "signals": groups,
+        "cellProfile": cell_profile,
+    }
+
+
+def _signal_group(
+    title: str,
+    y_label: str,
+    traces: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {"title": title, "yLabel": y_label, "traces": traces}
+
+
+def _trace_payload(name: str, points: list) -> dict[str, Any]:
+    values = [float(point[1]) for point in points]
+    return {
+        "name": name,
+        "x": [_round_time(float(point[0])) for point in points],
+        "y": values,
+        "points": len(values),
+        "flat": _is_flat(values),
+    }
+
+
+def _is_flat(values: list[float]) -> bool:
+    if not values:
+        return True
+    value_range = max(values) - min(values)
+    max_abs = max(abs(value) for value in values)
+    return value_range <= max(_FLAT_ABS_TOL, _FLAT_REL_TOL * max_abs)
+
+
+def _component_from_node_id(node_id: str) -> str | None:
+    if "." in node_id:
+        return node_id.split(".", 1)[0]
+    return node_id or None
+
+
+def _components_from_edge_id(edge_id: str) -> set[str]:
+    parts = [part for part in edge_id.split("_") if part]
+    if len(parts) >= 3:
+        return {parts[0], parts[2]}
+    if "." in edge_id:
+        return {edge_id.split(".", 1)[0]}
+    return {edge_id} if edge_id else set()
+
+
+# ---------------------------------------------------------------------------
 # HTML builder
 # ---------------------------------------------------------------------------
 
@@ -397,6 +681,9 @@ def _build_html(
     species_moles: dict[str, dict[str, list]],
     cell_temps: dict[str, list],
     cell_profiles: dict[str, Any],
+    *,
+    graph: HydraulicGraph | None = None,
+    components: Iterable[Any] | None = None,
 ) -> str:
     charts = _build_charts(
         node_pressures=node_pressures,
@@ -404,6 +691,16 @@ def _build_html(
         inv_states=inv_states,
         species_moles=species_moles,
         cell_temps=cell_temps,
+    )
+    element_payload = _build_element_payload(
+        node_pressures=node_pressures,
+        edge_flows=edge_flows,
+        inv_states=inv_states,
+        species_moles=species_moles,
+        cell_temps=cell_temps,
+        cell_profiles=cell_profiles,
+        graph=graph,
+        components=components,
     )
     summary = _build_summary(
         node_pressures=node_pressures,
@@ -426,7 +723,11 @@ def _build_html(
         ],
         "charts": [chart.to_payload() for chart in charts],
         "cellProfiles": cell_profiles,
+        "components": element_payload["components"],
+        "edges": element_payload["edges"],
         "emptyStates": {
+            "components": "No component-level data were recorded.",
+            "edges": "No edge-level data were recorded.",
             "pressures": "No node pressure traces were recorded.",
             "flows": "No edge flow traces were recorded.",
             "inventories": "No inventory state traces were recorded.",
@@ -441,9 +742,6 @@ def _build_html(
     safe_stem = html.escape(stem)
     meta_rows = _render_meta_rows(meta)
     metric_cards = _render_metric_cards(summary["metrics"])
-    temperatures_tab = _render_chart_tab(
-        "temperatures", "Search temperature traces", show_flat_default=True
-    )
     payload_json = _json_script_payload(payload)
     t_min = summary["timeStart"]
     t_max = summary["timeEnd"]
@@ -602,6 +900,41 @@ def _build_html(
     padding: 8px 11px;
   }}
   .chart-card {{ padding: 16px; margin-bottom: 16px; }}
+  .element-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 16px;
+  }}
+  .element-card {{ min-width: 0; }}
+  .element-meta {{
+    color: #657181;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    font-size: 0.82rem;
+    margin-top: 6px;
+  }}
+  .element-detail {{
+    border-top: 1px solid #edf0f3;
+    display: grid;
+    gap: 6px 12px;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    margin-top: 10px;
+    padding-top: 10px;
+  }}
+  .detail-label {{
+    color: #657181;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }}
+  .detail-value {{
+    color: #20242c;
+    font-size: 0.84rem;
+    margin-top: 2px;
+    overflow-wrap: anywhere;
+  }}
   .chart-head {{
     align-items: flex-start;
     display: flex;
@@ -622,6 +955,7 @@ def _build_html(
     margin: 4px 0 6px;
   }}
   .cell-profile-chart {{ height: 320px; }}
+  .element-plot-chart {{ height: 280px; }}
   .trace-list {{
     border-top: 1px solid #edf0f3;
     display: grid;
@@ -700,16 +1034,43 @@ def _build_html(
     {metric_cards}
   </section>
   <nav class="tabs" aria-label="Dashboard sections">
-    <button class="tab-button active" data-tab="overview">Overview</button>
-    <button class="tab-button" data-tab="pressures">Pressures</button>
-    <button class="tab-button" data-tab="flows">Flows</button>
-    <button class="tab-button" data-tab="inventories">Inventories</button>
-    <button class="tab-button" data-tab="species">Species</button>
-    <button class="tab-button" data-tab="temperatures">Temperatures</button>
+    <button class="tab-button active" data-tab="components">Components</button>
+    <button class="tab-button" data-tab="edges">Edges</button>
+    <button class="tab-button" data-tab="overview">Overview</button>
+    <button class="tab-button" data-tab="signals">Signals</button>
     <button class="tab-button" data-tab="cells">Pipe Cells</button>
   </nav>
 
-  <section class="tab-panel active" data-panel="overview">
+  <section class="tab-panel active" data-panel="components">
+    <div class="toolbar">
+      <input
+        class="search-input"
+        data-component-search
+        type="search"
+        placeholder="Search components, nodes, edges, species"
+      >
+      <button class="control-button" data-reset-components>Reset components</button>
+    </div>
+    <div id="component-summary" class="panel-subtitle"></div>
+    <div id="component-explorer" class="element-grid"></div>
+  </section>
+
+  <section class="tab-panel" data-panel="edges">
+    <div class="toolbar">
+      <input
+        class="search-input"
+        data-edge-search
+        type="search"
+        placeholder="Search edges, endpoints, phases, species"
+      >
+      <select class="select-input" data-edge-time aria-label="Snapshot time"></select>
+      <button class="control-button" data-reset-edges>Reset edges</button>
+    </div>
+    <div id="edge-summary" class="panel-subtitle"></div>
+    <div id="edge-explorer" class="element-grid"></div>
+  </section>
+
+  <section class="tab-panel" data-panel="overview">
     <div class="overview-grid">
       <div class="panel">
         <h2>Simulation Metadata</h2>
@@ -726,11 +1087,7 @@ def _build_html(
     </div>
   </section>
 
-  {_render_chart_tab("pressures", "Search pressure traces")}
-  {_render_chart_tab("flows", "Search flow traces")}
-  {_render_chart_tab("inventories", "Search inventory traces")}
-  {_render_chart_tab("species", "Search species traces")}
-  {temperatures_tab}
+  {_render_signals_tab()}
   {_render_cell_tab()}
 </main>
 <script id="dashboard-data" type="application/json">{payload_json}</script>
@@ -738,7 +1095,9 @@ def _build_html(
 (() => {{
   const payload = JSON.parse(document.getElementById("dashboard-data").textContent);
   const chartTabs = ["pressures", "flows", "inventories", "species", "temperatures"];
-  const tabs = [...chartTabs, "cells"];
+  const tabs = ["components", "edges", "overview", "signals", "cells"];
+  const components = payload.components || [];
+  const edges = payload.edges || [];
   const cellProfiles = payload.cellProfiles || {{ times: [], edges: [] }};
   const cellTimes = cellProfiles.times || [];
   const colorway = [
@@ -746,16 +1105,13 @@ def _build_html(
     "#0f766e", "#c2410c", "#4a5568", "#7c3aed", "#0369a1"
   ];
   const latestCellTime = cellTimes.length ? cellTimes[cellTimes.length - 1].key : "";
-  function defaultShowFlat(tab) {{
-    return tab === "temperatures";
-  }}
   const state = {{
-    activeTab: "overview",
-    query: Object.fromEntries(chartTabs.map((tab) => [tab, ""])),
-    showFlat: Object.fromEntries(chartTabs.map((tab) => [
-      tab,
-      defaultShowFlat(tab)
-    ])),
+    activeTab: "components",
+    componentQuery: "",
+    edgeQuery: "",
+    edgeTimeKey: latestCellTime,
+    signalQuery: "",
+    signalShowFlat: false,
     cellQuery: "",
     cellTimeKey: latestCellTime,
     visibility: {{}}
@@ -786,10 +1142,14 @@ def _build_html(
     document.querySelectorAll(".tab-panel").forEach((panel) => {{
       panel.classList.toggle("active", panel.dataset.panel === tab);
     }});
-    if (tab === "cells") {{
+    if (tab === "components") {{
+      renderComponents();
+    }} else if (tab === "edges") {{
+      renderEdges();
+    }} else if (tab === "signals") {{
+      renderSignals();
+    }} else if (tab === "cells") {{
       renderCells();
-    }} else if (tab !== "overview") {{
-      renderTab(tab);
     }}
   }}
 
@@ -810,23 +1170,42 @@ def _build_html(
   }}
 
   function filteredTraces(chart, tab) {{
-    const query = state.query[tab].trim().toLowerCase();
+    const query = tab === "signals"
+      ? state.signalQuery.trim().toLowerCase()
+      : "";
     return chart.traces.filter((trace) => {{
-      const matches = !query || trace.name.toLowerCase().includes(query);
-      const allowedFlat = state.showFlat[tab] || !trace.flat || chart.allFlat;
+      const matches = !query ||
+        trace.name.toLowerCase().includes(query) ||
+        chart.title.toLowerCase().includes(query);
+      const allowedFlat = tab === "signals"
+        ? state.signalShowFlat || !trace.flat || chart.allFlat
+        : !trace.flat || chart.allFlat;
       return matches && allowedFlat;
     }});
   }}
 
-  function renderTab(tab) {{
-    const container = document.getElementById(`charts-${{tab}}`);
-    const charts = payload.charts.filter((chart) => chart.tab === tab);
+  function renderSignals() {{
+    const container = document.getElementById("charts-signals");
+    const summary = document.getElementById("signal-summary");
+    const query = state.signalQuery.trim().toLowerCase();
+    const charts = payload.charts.filter((chart) => {{
+      if (!query) return true;
+      const haystack = [
+        chart.title,
+        chart.tab,
+        ...chart.traces.map((trace) => trace.name)
+      ].join(" ").toLowerCase();
+      return haystack.includes(query);
+    }});
     container.innerHTML = "";
     if (!charts.length) {{
-      container.appendChild(emptyState(payload.emptyStates[tab]));
+      summary.textContent = "";
+      container.appendChild(emptyState("No signal charts match this filter."));
       return;
     }}
-    charts.forEach((chart) => renderChart(container, chart, tab));
+    const traceCount = charts.reduce((sum, chart) => sum + chart.traces.length, 0);
+    summary.textContent = `${{charts.length}} chart(s), ${{traceCount}} trace(s)`;
+    charts.forEach((chart) => renderChart(container, chart, "signals"));
   }}
 
   function renderChart(container, chart, tab) {{
@@ -854,7 +1233,9 @@ def _build_html(
       chart.traces.forEach((trace) => {{
         state.visibility[traceKey(chart, trace)] = defaultVisible(chart, trace);
       }});
-      renderTab(tab);
+      if (tab === "signals") {{
+        renderSignals();
+      }}
     }});
 
     renderTraceList(card.querySelector("[data-trace-list]"), chart, traces, tab);
@@ -875,7 +1256,9 @@ def _build_html(
       checkbox.checked = isVisible(chart, trace);
       checkbox.addEventListener("change", () => {{
         state.visibility[traceKey(chart, trace)] = checkbox.checked;
-        renderTab(tab);
+        if (tab === "signals") {{
+          renderSignals();
+        }}
       }});
       const name = document.createElement("span");
       name.className = "trace-name";
@@ -938,6 +1321,222 @@ def _build_html(
     Plotly.react(plotId, plotTraces, layout, config);
   }}
 
+  function renderComponents() {{
+    const container = document.getElementById("component-explorer");
+    const summary = document.getElementById("component-summary");
+    const query = state.componentQuery.trim().toLowerCase();
+    container.innerHTML = "";
+    const visible = components.filter((component) =>
+      matchesElement(component, query)
+    );
+    summary.textContent =
+      `${{visible.length}} component(s), ${{components.length}} total`;
+    if (!visible.length) {{
+      container.appendChild(emptyState(payload.emptyStates.components));
+      return;
+    }}
+    visible.forEach((component, index) => {{
+      renderElementCard(container, component, "component", index);
+    }});
+  }}
+
+  function renderEdges() {{
+    const container = document.getElementById("edge-explorer");
+    const summary = document.getElementById("edge-summary");
+    const query = state.edgeQuery.trim().toLowerCase();
+    container.innerHTML = "";
+    const visible = edges.filter((edge) => matchesElement(edge, query));
+    summary.textContent = `${{visible.length}} edge(s), ${{edges.length}} total`;
+    if (!visible.length) {{
+      container.appendChild(emptyState(payload.emptyStates.edges));
+      return;
+    }}
+    visible.forEach((edge, index) => {{
+      renderElementCard(container, edge, "edge", index);
+    }});
+  }}
+
+  function matchesElement(element, query) {{
+    if (!query) return true;
+    const signalText = (element.signals || []).flatMap((group) => [
+      group.title,
+      ...(group.traces || []).map((trace) => trace.name)
+    ]);
+    const profile = element.cellProfile;
+    const profileText = profile
+      ? [
+          ...(profile.phases || []),
+          ...(profile.species || []).map((item) => item.name)
+        ]
+      : [];
+    const haystack = [
+      element.id,
+      element.type,
+      element.role,
+      element.origin,
+      element.destination,
+      element.component,
+      ...(element.nodes || []),
+      ...(element.inventories || []),
+      ...(element.edges || []),
+      ...signalText,
+      ...profileText
+    ].filter(Boolean).join(" ").toLowerCase();
+    return haystack.includes(query);
+  }}
+
+  function renderElementCard(container, element, kind, index) {{
+    const card = document.createElement("article");
+    card.className = "chart-card element-card";
+    const groups = element.signals || [];
+    const plotPrefix = `${{kind}}-${{index}}`;
+    card.innerHTML = `
+      <div class="chart-head">
+        <div>
+          <h2>${{escapeHtml(element.id)}}</h2>
+          <div class="chart-meta">${{escapeHtml(elementSubtitle(element, kind))}}</div>
+        </div>
+      </div>
+      ${{elementDetailHtml(element, kind)}}
+      <div class="profile-plots" data-element-plots></div>
+      <div data-element-cell-profile></div>
+    `;
+    container.appendChild(card);
+    const plotContainer = card.querySelector("[data-element-plots]");
+    if (!groups.length) {{
+      plotContainer.replaceWith(emptyState("No time-series signals for this element."));
+    }} else {{
+      groups.forEach((group, groupIndex) => {{
+        const wrap = document.createElement("div");
+        wrap.className = "cell-plot";
+        const plotId = `element-${{plotPrefix}}-${{groupIndex}}`;
+        wrap.innerHTML = `
+          <div class="cell-plot-title">${{escapeHtml(group.title)}}</div>
+          <div id="${{plotId}}" class="plotly-chart element-plot-chart"></div>
+        `;
+        plotContainer.appendChild(wrap);
+        renderElementPlot(plotId, group);
+      }});
+    }}
+    if (kind === "edge" && element.cellProfile) {{
+      renderInlineCellProfile(
+        card.querySelector("[data-element-cell-profile]"),
+        element.cellProfile,
+        index
+      );
+    }}
+  }}
+
+  function elementSubtitle(element, kind) {{
+    if (kind === "component") {{
+      return `${{element.type}} · ${{(element.nodes || []).length}} node(s) · ` +
+        `${{(element.edges || []).length}} edge(s)`;
+    }}
+    const external = element.external === null || element.external === undefined
+      ? "recorded edge"
+      : (element.external ? "external edge" : "internal edge");
+    return `${{element.role}} · ${{external}}`;
+  }}
+
+  function elementDetailHtml(element, kind) {{
+    const rows = kind === "component" ? [
+      ["Type", element.type],
+      ["Nodes", (element.nodes || []).join(", ")],
+      ["Inventories", (element.inventories || []).join(", ") || "none"],
+      ["Edges", (element.edges || []).join(", ") || "none"]
+    ] : [
+      ["Origin", element.origin || "unknown"],
+      ["Destination", element.destination || "unknown"],
+      ["Component", element.component || "external tubing"],
+      ["Length", element.length === null || element.length === undefined
+        ? "n/a" : `${{formatNumber(element.length)}} m`],
+      ["Diameter", element.diameter === null || element.diameter === undefined
+        ? "n/a" : `${{formatNumber(element.diameter)}} m`]
+    ];
+    return `
+      <div class="element-detail">
+        ${{rows.map(([label, value]) => `
+          <div>
+            <div class="detail-label">${{escapeHtml(label)}}</div>
+            <div class="detail-value">${{escapeHtml(value)}}</div>
+          </div>
+        `).join("")}}
+      </div>
+    `;
+  }}
+
+  function renderElementPlot(plotId, group) {{
+    const traces = (group.traces || []).map((trace) => ({{
+      x: trace.x,
+      y: trace.y,
+      mode: "lines",
+      name: trace.name,
+      type: "scatter",
+      line: {{ width: trace.flat ? 1.4 : 2.2 }},
+      hovertemplate:
+        "%{{fullData.name}}<br>t=%{{x:.6g}} s" +
+        "<br>value=%{{y:.6g}}<extra></extra>"
+    }}));
+    const layout = {{
+      autosize: true,
+      colorway,
+      hovermode: "x unified",
+      margin: {{ t: 12, r: 18, b: 54, l: 62 }},
+      paper_bgcolor: "#ffffff",
+      plot_bgcolor: "#ffffff",
+      xaxis: {{
+        title: {{ text: "Simulation time (s)", standoff: 8 }},
+        gridcolor: "#e9edf2",
+        zerolinecolor: "#cbd4df"
+      }},
+      yaxis: {{
+        title: {{ text: group.yLabel, standoff: 8 }},
+        gridcolor: "#e9edf2",
+        zerolinecolor: "#cbd4df"
+      }},
+      legend: {{
+        orientation: "h",
+        y: -0.25,
+        x: 0,
+        font: {{ size: 11 }}
+      }}
+    }};
+    Plotly.react(plotId, traces, layout, plotConfig());
+  }}
+
+  function renderInlineCellProfile(container, edge, index) {{
+    if (!cellTimes.length) return;
+    const selected = cellTimes.find((time) => time.key === state.edgeTimeKey) ||
+      cellTimes[cellTimes.length - 1];
+    state.edgeTimeKey = selected.key;
+    const snapshot = edge.snapshots[selected.key];
+    if (!snapshot) return;
+    const statePlotId = `edge-cell-state-${{index}}`;
+    const contentPlotId = `edge-cell-content-${{index}}`;
+    container.innerHTML = `
+      <div class="profile-plots">
+        <div class="cell-plot">
+          <div class="cell-plot-title">
+            Cell state at ${{escapeHtml(selected.label)}}
+          </div>
+          <div id="${{statePlotId}}" class="plotly-chart cell-profile-chart"></div>
+        </div>
+        <div class="cell-plot">
+          <div class="cell-plot-title">
+            Cell content at ${{escapeHtml(selected.label)}}
+          </div>
+          <div id="${{contentPlotId}}" class="plotly-chart cell-profile-chart"></div>
+        </div>
+      </div>
+    `;
+    renderCellStatePlot(statePlotId, edge, snapshot);
+    if (!renderCellContentPlot(contentPlotId, edge, snapshot)) {{
+      document.getElementById(contentPlotId).replaceWith(
+        emptyState("No cell_content rows at this snapshot.")
+      );
+    }}
+  }}
+
   function populateCellTimeSelect() {{
     const select = document.querySelector("[data-cell-time]");
     select.innerHTML = "";
@@ -957,6 +1556,27 @@ def _build_html(
       select.appendChild(option);
     }});
     select.value = state.cellTimeKey;
+  }}
+
+  function populateEdgeTimeSelect() {{
+    const select = document.querySelector("[data-edge-time]");
+    select.innerHTML = "";
+    if (!cellTimes.length) {{
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No snapshots";
+      select.appendChild(option);
+      select.disabled = true;
+      return;
+    }}
+    select.disabled = false;
+    cellTimes.forEach((time) => {{
+      const option = document.createElement("option");
+      option.value = time.key;
+      option.textContent = time.label;
+      select.appendChild(option);
+    }});
+    select.value = state.edgeTimeKey;
   }}
 
   function renderCells() {{
@@ -1280,31 +1900,59 @@ def _build_html(
   document.querySelectorAll(".tab-button").forEach((button) => {{
     button.addEventListener("click", () => setTab(button.dataset.tab));
   }});
-  chartTabs.forEach((tab) => {{
-    const input = document.querySelector(`[data-search="${{tab}}"]`);
-    const flatToggle = document.querySelector(`[data-show-flat="${{tab}}"]`);
-    const reset = document.querySelector(`[data-reset-tab="${{tab}}"]`);
-    input.addEventListener("input", () => {{
-      state.query[tab] = input.value;
-      renderTab(tab);
-    }});
-    flatToggle.addEventListener("change", () => {{
-      state.showFlat[tab] = flatToggle.checked;
-      renderTab(tab);
-    }});
-    reset.addEventListener("click", () => {{
-      state.query[tab] = "";
-      state.showFlat[tab] = defaultShowFlat(tab);
-      input.value = "";
-      flatToggle.checked = defaultShowFlat(tab);
-      payload.charts
-        .filter((chart) => chart.tab === tab)
-        .forEach((chart) => chart.traces.forEach((trace) => {{
-          state.visibility[traceKey(chart, trace)] = defaultVisible(chart, trace);
-        }}));
-      renderTab(tab);
-    }});
+  const componentSearch = document.querySelector("[data-component-search]");
+  const componentReset = document.querySelector("[data-reset-components]");
+  componentSearch.addEventListener("input", () => {{
+    state.componentQuery = componentSearch.value;
+    renderComponents();
   }});
+  componentReset.addEventListener("click", () => {{
+    state.componentQuery = "";
+    componentSearch.value = "";
+    renderComponents();
+  }});
+
+  const edgeSearch = document.querySelector("[data-edge-search]");
+  const edgeTimeSelect = document.querySelector("[data-edge-time]");
+  const edgeReset = document.querySelector("[data-reset-edges]");
+  edgeSearch.addEventListener("input", () => {{
+    state.edgeQuery = edgeSearch.value;
+    renderEdges();
+  }});
+  edgeTimeSelect.addEventListener("change", () => {{
+    state.edgeTimeKey = edgeTimeSelect.value;
+    renderEdges();
+  }});
+  edgeReset.addEventListener("click", () => {{
+    state.edgeQuery = "";
+    state.edgeTimeKey = latestCellTime;
+    edgeSearch.value = "";
+    edgeTimeSelect.value = latestCellTime;
+    renderEdges();
+  }});
+
+  const signalSearch = document.querySelector("[data-signal-search]");
+  const signalFlatToggle = document.querySelector("[data-show-flat-signals]");
+  const signalReset = document.querySelector("[data-reset-signals]");
+  signalSearch.addEventListener("input", () => {{
+    state.signalQuery = signalSearch.value;
+    renderSignals();
+  }});
+  signalFlatToggle.addEventListener("change", () => {{
+    state.signalShowFlat = signalFlatToggle.checked;
+    renderSignals();
+  }});
+  signalReset.addEventListener("click", () => {{
+    state.signalQuery = "";
+    state.signalShowFlat = false;
+    signalSearch.value = "";
+    signalFlatToggle.checked = false;
+    payload.charts.forEach((chart) => chart.traces.forEach((trace) => {{
+      state.visibility[traceKey(chart, trace)] = defaultVisible(chart, trace);
+    }}));
+    renderSignals();
+  }});
+
   const cellSearch = document.querySelector("[data-cell-search]");
   const cellTimeSelect = document.querySelector("[data-cell-time]");
   const cellReset = document.querySelector("[data-reset-cells]");
@@ -1324,7 +1972,9 @@ def _build_html(
     renderCells();
   }});
 
+  populateEdgeTimeSelect();
   populateCellTimeSelect();
+  renderComponents();
   renderDatasetSummary();
 }})();
 </script>
@@ -1647,6 +2297,27 @@ def _render_chart_tab(
       <button class="control-button" data-reset-tab="{safe_tab}">Reset tab</button>
     </div>
     <div id="charts-{safe_tab}"></div>
+  </section>"""
+
+
+def _render_signals_tab() -> str:
+    return """
+  <section class="tab-panel" data-panel="signals">
+    <div class="toolbar">
+      <input
+        class="search-input"
+        data-signal-search
+        type="search"
+        placeholder="Search signal charts and traces"
+      >
+      <label class="checkbox-label">
+        <input data-show-flat-signals type="checkbox">
+        Show flat traces
+      </label>
+      <button class="control-button" data-reset-signals>Reset signals</button>
+    </div>
+    <div id="signal-summary" class="panel-subtitle"></div>
+    <div id="charts-signals"></div>
   </section>"""
 
 

@@ -240,12 +240,27 @@ def test_render_dashboard_html_builds_analysis_cockpit_payload(workspace_tmp):
     db_path = workspace_tmp / "dashboard.db"
     _write_recorded_db(db_path, graph)
 
-    html = render_dashboard_html(db_path)
+    html = render_dashboard_html(
+        db_path,
+        graph=graph,
+        components=[SimpleNamespace(name="comp")],
+    )
     payload = _dashboard_payload(html)
 
     assert "Plotly.react" in html
+    assert 'data-tab="components"' in html
+    assert 'data-tab="edges"' in html
     assert 'data-tab="overview"' in html
-    assert 'data-search="pressures"' in html
+    assert 'data-tab="signals"' in html
+    assert "component-explorer" in html
+    assert "edge-explorer" in html
+    assert payload["components"][0]["id"] == "comp"
+    assert payload["components"][0]["edges"] == ["e1"]
+    assert payload["edges"][0]["id"] == "e1"
+    assert {group["title"] for group in payload["edges"][0]["signals"]} >= {
+        "Flow rate",
+        "Average cell temperature",
+    }
     assert payload["summary"]["sampleCount"] == 2
     assert payload["summary"]["timeStart"] == 0.0
     assert payload["summary"]["timeEnd"] == 1.0
@@ -259,7 +274,7 @@ def test_render_dashboard_html_builds_analysis_cockpit_payload(workspace_tmp):
         chart for chart in payload["charts"] if chart["id"] == "inv_temperatures"
     )
     assert inv_temp_chart["tab"] == "temperatures"
-    assert '<input data-show-flat="temperatures" type="checkbox" checked>' in html
+    assert '<input data-show-flat-signals type="checkbox">' in html
 
 
 def test_render_dashboard_html_hides_flat_traces_by_default(workspace_tmp):
@@ -410,6 +425,8 @@ def test_render_dashboard_html_handles_missing_optional_tables(workspace_tmp):
         "node_pressures",
         "edge_flows",
     }
+    assert payload["components"]
+    assert payload["edges"][0]["id"] == "e0"
 
 
 def load_latest_snapshot_from_rows(
@@ -513,6 +530,10 @@ def test_visualization_endpoint_writes_visualization_files(workspace_tmp):
     dashboard_text = dashboard_html.read_text(encoding="utf-8")
     assert "Plotly.react" in dashboard_text
     assert "e1" in dashboard_text
+    payload = _dashboard_payload(dashboard_text)
+    assert payload["components"][0]["id"] == "comp"
+    assert payload["edges"][0]["origin"] == "n0"
+    assert payload["edges"][0]["destination"] == "n1"
 
 
 def test_visualization_endpoint_rejects_unreadable_db(workspace_tmp):

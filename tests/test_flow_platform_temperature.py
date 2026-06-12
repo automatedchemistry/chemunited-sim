@@ -1,0 +1,167 @@
+"""Flow-platform temperature and transport-fill regressions."""
+
+from __future__ import annotations
+
+import json
+import queue
+import re
+import shutil
+import sqlite3
+import time
+from pathlib import Path
+
+import pytest
+from chemunited_core.components.enums import InternalEdgeRole, PortAccess
+from fastapi.testclient import TestClient
+
+from chemunited_sim.cli import server
+from chemunited_sim.cli.clock import SimClock
+from chemunited_sim.cli.loader import load_project
+from chemunited_sim.cli.server import SimStatus, SimulationState, app
+from chemunited_sim.inventory.port_map import build_port_map
+from chemunited_sim.worker import SimConfig
+
+PROJECT_PATH = Path("tests") / "flow_platform"
+
+
+@pytest.fixture
+def workspace_tmp(request) -> Path:
+    safe_name = request.node.name.replace("/", "_").replace("\\", "_")
+    path = Path("examples") / "simulation" / "test_flow_platform_tmp" / safe_name
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True, exist_ok=True)
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _stop_background_threads() -> None:
+    if server._state is None:
+        return
+    server._state._stop_event.set()
+    for thread in (server._state._workflow_thread, server._state._worker_thread):
+        if thread is not None:
+            thread.join(timeout=5.0)
+    server._state.sim_status = SimStatus.IDLE
+
+
+def _wait_until_idle(client: TestClient, timeout: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if client.get("/status").json()["sim_status"] == "idle":
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _dashboard_payload(html_text: str) -> dict:
+    match = re.search(
+        r'<script id="dashboard-data" type="application/json">(.*?)</script>',
+        html_text,
+        re.DOTALL,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
+
+
+def test_reactor_liquid_path_uses_bottom_ports():
+    project = load_project(PROJECT_PATH)
+    port_map = build_port_map(project.graph, list(project.components.values()))
+
+    assert port_map["reactortube_2_reactor_2"].access == PortAccess.BOTTOM
+    assert port_map["reactor_1_bpr_1"].access == PortAccess.BOTTOM
+
+
+def test_mode1_latest_snapshot_keeps_all_transport_edges(workspace_tmp):
+    server._state = SimulationState(
+        sim_status=SimStatus.NO_PROJECT,
+        current_t=0.0,
+        config=SimConfig(),
+        db_path=None,
+        project=None,
+        clock=SimClock(),
+        cmd_queue=queue.Queue(),
+        db_dir=workspace_tmp,
+    )
+
+    try:
+        with TestClient(app) as client:
+            resp = client.post(
+                "/project/load", json={"path": str(PROJECT_PATH.resolve())}
+            )
+            assert resp.status_code == 200
+            resp = client.post(
+                "/simulation/start",
+                json={
+                    "execution_id": "flow_viz_run",
+                    "dt": 0.5,
+                    "t_end": None,
+                    "real_time": False,
+                    "historical_file": "run_001.json",
+                },
+            )
+            assert resp.status_code == 200
+            assert _wait_until_idle(client)
+            resp = client.get("/simulation/visualization")
+            assert resp.status_code == 200
+            graph_html = Path(resp.json()["graph_html"])
+            dashboard_html = Path(resp.json()["dashboard_html"])
+            assert graph_html.exists()
+            assert dashboard_html.exists()
+            graph_text = graph_html.read_text(encoding="utf-8")
+            dashboard_text = dashboard_html.read_text(encoding="utf-8")
+            dashboard_payload = _dashboard_payload(dashboard_text)
+
+        assert server._state is not None
+        assert server._state.project is not None
+        assert server._state.db_path is not None
+        expected_transport_edges = {
+            edge_id
+            for edge_id, edge in server._state.project.graph.edges.items()
+            if edge.role == InternalEdgeRole.TRANSPORT
+        }
+
+        with sqlite3.connect(server._state.db_path) as conn:
+            latest = conn.execute("SELECT MAX(time) FROM node_pressure").fetchone()[0]
+            latest_cell_edges = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT DISTINCT edge_id FROM cell_state WHERE time = ?",
+                    (latest,),
+                )
+            }
+            average_temperatures = dict(
+                conn.execute(
+                    """
+                    SELECT edge_id, AVG(temperature)
+                    FROM cell_state
+                    WHERE time = ?
+                    GROUP BY edge_id
+                    """,
+                    (latest,),
+                )
+            )
+
+        assert latest_cell_edges == expected_transport_edges
+        component_ids = {
+            component["id"] for component in dashboard_payload["components"]
+        }
+        edge_ids = {edge["id"] for edge in dashboard_payload["edges"]}
+        assert {"reactor", "bpr"} <= component_ids
+        assert {"reactor_1_bpr_1", "bpr_2_divertvalve_0"} <= edge_ids
+        for edge_id in (
+            "reactor_1_bpr_1",
+            "bpr_2_divertvalve_0",
+            "divertvalve_2_wastesink_1",
+        ):
+            assert average_temperatures[edge_id] > 298.15
+            assert edge_id in graph_text
+            edge_payload = next(
+                edge for edge in dashboard_payload["edges"] if edge["id"] == edge_id
+            )
+            signal_titles = {group["title"] for group in edge_payload["signals"]}
+            assert {"Flow rate", "Average cell temperature"} <= signal_titles
+        assert "average cell temperature" in graph_text
+        assert "component-explorer" in dashboard_text
+        assert "edge-explorer" in dashboard_text
+    finally:
+        _stop_background_threads()

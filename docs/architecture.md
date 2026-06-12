@@ -20,59 +20,87 @@ Worker.step()
 
 The package does not read GUI objects directly during simulation. It consumes
 `chemunited-core` component and connection data, compiles a graph, and then
-runs from the compiled graph and runtime state.
+runs from the compiled graph and runtime state. The worker also keeps the
+live `ComponentData` instances so active elements (pumps, MFCs, BPRs, flow
+sources) can be re-evaluated each tick.
 
 ## Worker Step Order
 
 `Worker.step()` applies one operator-splitting time step:
 
 1. Solve hydraulics.
-2. Record the current state if a `Recorder` is attached and the time is due.
-3. Advance transport pockets through edges.
-4. Assimilate arrived pockets into vessel inventories.
-5. Apply reactions to inventory states.
-6. Emit replacement pockets from inventories.
-7. Inject emitted pockets into transport queues.
-8. Advance simulation time by `dt`.
+2. Update resistance overrides for active elements from the solved
+   pressures, so the *next* solve uses correct values:
+   - Pumps and MFCs: `comp.update_resistance(dp)` from the edge pressure
+     drop (pump resistance can be negative — active element model).
+   - BPRs: see [Back-Pressure Regulators](#back-pressure-regulators).
+3. Record the current state if a `Recorder` is attached and the record
+   interval is due.
+4. Advance transport pockets through edges.
+5. Assimilate arrived pockets into vessel inventories.
+6. Apply reactions to inventory states.
+7. Apply wall heat exchange (Newton cooling) to vessels that enable it.
+8. Emit replacement pockets from inventories for departing volumes.
+9. Emit pockets from `FlowSource` boundary components (infinite reservoirs,
+   or finite syringe pumps with tracked remaining volume).
+10. Inject all emitted pockets into transport queues and pad underfilled
+    edges with air carrier pockets.
+11. Advance simulation time by `dt`.
 
 Because recording happens before transport advances, a full `Worker.run()`
-with a recorder captures `t=0`.
+with a recorder captures `t=0`. `Worker.run()` terminates at
+`config.t_end` (integer-tick arithmetic, inclusive) and/or when an optional
+`stop_condition` callable returns `True`; at least one of the two must be
+provided.
 
 ## Hydraulic Graph
 
 The adapter compiles a platform into:
 
-- `HydraulicNode`: a component port, inventory node, or junction hub.
+- `HydraulicNode`: an immutable component port, inventory node, or junction
+  hub, optionally carrying a boundary condition.
 - `HydraulicEdge`: an internal component channel or external connection.
-- `HydraulicGraph`: dictionaries of nodes and edges, inventory snapshots, and
-  a list of BPR-controlled edge IDs.
+  Mutable — the worker rewrites `resistance_override` in-place each tick for
+  pump, MFC, BPR, and valve edges.
+- `HydraulicGraph`: dictionaries of nodes and edges, plus deep-copied
+  `InventoryNode` snapshots used to seed inventory states.
+
+`adapter.resync_component()` re-propagates a component's internal-edge
+resistance overrides into the compiled graph after runtime commands
+(e.g. valve switches); topology never changes after compilation.
 
 All lengths, diameters, volumes, pressures, flows, temperatures, and
 resistances are converted to SI values before simulation modules consume them.
 
 ## Hydraulics
 
-`chemunited_sim.hydraulics.solve()` builds a sparse nodal admittance system and
-solves for absolute pressure at each node. Flows are then back-computed for
-each edge.
+`chemunited_sim.hydraulics.solve()` builds a sparse nodal admittance system
+and solves for absolute pressure at each node with
+`scipy.sparse.linalg.spsolve`. Edge flows are then back-computed as
+`Q = G · (P_origin − P_destination)` (signed: positive = origin →
+destination).
 
 Boundary handling:
 
-- Pressure boundaries pin a node to an absolute pressure.
-- Flow boundaries add a source/sink term to the right-hand side.
-- Connected components without pressure boundaries are anchored to atmosphere.
+- Pressure boundaries pin a node to an absolute pressure (Dirichlet row
+  replacement).
+- Flow boundaries add a source/sink term to the right-hand side (Neumann).
+- Connected components without pressure boundaries are anchored to
+  atmosphere at one node to keep the system non-singular.
 
-Resistance handling:
+Resistance handling (per edge, in priority order):
 
-- Junction edges are nearly lossless.
-- Transport edges use Hagen-Poiseuille resistance.
-- Edge `resistance_override` takes priority, which is how BPRs and closed
-  valve channels are represented.
+1. `resistance_override` is used directly when set — this is how pumps,
+   MFCs, BPRs, and closed valve channels are represented.
+2. Junction edges use the small epsilon resistance `R_JUNCTION`
+   (nearly lossless, keeps the matrix well-conditioned).
+3. Transport edges use Hagen-Poiseuille resistance
+   `R = 128·η·L / (π·D⁴)` with the configured carrier viscosity.
 
 ## Transport
 
-Transport edges hold FIFO queues of immutable `Pocket` objects. A pocket stores
-phase, volume, species moles, temperature, and pressure.
+Transport edges hold FIFO queues of immutable `Pocket` objects. A pocket
+stores phase, volume, species moles, temperature, and pressure.
 
 Deque orientation is fixed to graph orientation:
 
@@ -81,19 +109,65 @@ Deque orientation is fixed to graph orientation:
 - Positive flow pops from the destination end.
 - Negative flow pops from the origin end.
 
-Pockets that exit a transport edge may reach an inventory, a hub, or a boundary
-node. Hub arrivals are merged by phase and redistributed to outgoing transport
-edges according to displaced volume.
+`advance()` performs two passes per step. Pass 1 pops the displaced volume
+`|Q|·dt` from each open transport edge (splitting the boundary pocket if
+needed) and routes each exiting pocket — following junction edges in the
+direction of flow, up to a hop limit — until it reaches:
+
+- an inventory node (added to arrivals),
+- a hub node (staged for pass 2),
+- another transport edge fed from a port (re-injected, split across outgoing
+  edges by displaced volume), or
+- a dead-end boundary port (absorbed and discarded).
+
+Pass 2 merges hub-staged pockets by phase (ideal mixing) and redistributes
+them to outgoing transport edges proportionally to displaced volume.
+
+Edges closed by a large resistance override, or with zero flow, carry their
+queues forward unchanged. Pockets below `MIN_POCKET_VOLUME` are discarded at
+the end of each step.
+
+`advance()` also reports departures: the volume that left the
+inventory-connected end of each transport edge, which drives inventory
+emission. `inject()` appends emitted pockets at the inflow end of each edge
+and pads any underfilled edge with an air carrier pocket so transport edges
+are always full.
 
 ## Inventory
 
 Vessel inventory state is seeded from the inventory snapshots stored in the
 compiled graph. During each step:
 
+- Vessel pressure is refreshed from the hydraulic solve for *all* vessels
+  (the solver is the authoritative pressure source).
 - Arriving pockets increase the appropriate phase volume and species moles.
-- Vessel pressure is refreshed from the hydraulic state.
-- Temperature is updated by volume-weighted blending.
-- Departing volumes emit gas from top ports or liquid from bottom ports.
+- Temperature is blended by thermal mass (`Σ n_i·Cp_i` over both phases,
+  instantaneous equilibrium between phases). When no tracked species carry
+  thermal mass, blending falls back to volume weighting with a warning.
+- Departing volumes emit gas from `TOP` ports or liquid from `BOTTOM` ports,
+  removing a proportional fraction of the phase's species. If the requested
+  phase runs out, the deficit is filled with carrier (air for gas, computed
+  from the ideal gas law) and a warning is logged.
+
+### Flow sources and syringe pumps
+
+`FlowSource` components compile to a single boundary node and emit pockets
+directly into their outgoing transport edge each tick:
+
+- Plain flow sources are infinite reservoirs: their declared concentration
+  (`initial_species / content volume`) is constant and never depleted.
+  `direction_upward` selects liquid (default) or gas emission.
+- Syringe pumps are finite: the worker tracks the remaining liquid volume,
+  decrements it on dispense, refills it on withdrawal (negative flow), and
+  falls back to emitting air once the syringe runs dry (with warnings for
+  run-dry and over-fill).
+
+### Heat exchange
+
+Vessels with `heat_exchange=True` get a Newton-cooling update each step:
+`Q̇ = U·A·(T_wall − T_vessel)`, applied against the vessel's tracked-species
+thermal mass. Multi-well components (e.g. vials) register one entry per
+well. Vessels with zero thermal mass are skipped.
 
 ## Reactions
 
@@ -105,17 +179,40 @@ Reactions are attached through a `ReactionsMap`:
 }
 ```
 
-Any object with `step(state, dt) -> None` can be a reaction. Built-in reaction
-models include `NullReaction`, `FirstOrderDecay`, and
-`StoichiometricReaction`.
+Any object with `step(state, dt) -> None` can be a reaction (structural
+`Protocol`; mutates the inventory state in-place). Built-in reaction models
+include `NullReaction`, `FirstOrderDecay`, and `StoichiometricReaction`.
+Both kinetic models support an optional temperature change per mole
+converted (positive = vessel heats up).
 
 ## Back-Pressure Regulators
 
-The worker pre-resolves BPR edges at construction. On every step it iterates
-hydraulic solves until each BPR edge state is stable:
+The worker pre-resolves BPR edges at construction. Once per step, after the
+hydraulic solve, each BPR edge's resistance override is updated for the next
+tick:
 
-- Open when upstream pressure is at or above the setpoint.
-- Closed when upstream pressure is below the setpoint.
+- While closed (`R_MAX_HYDRAULIC`), the upstream pressure is genuine: the
+  edge stays closed below the setpoint and opens fully once the setpoint is
+  reached.
+- While open, a proportional model drives the upstream pressure toward the
+  setpoint: `R = (setpoint − P_downstream) / |Q|`. If the downstream
+  pressure already exceeds the setpoint, the override is cleared (fully
+  open) and the network settles naturally.
 
-Closed BPR edges use the large hydraulic resistance constant from
-`chemunited-core`.
+## Recorder
+
+`Recorder` is the sole SQLite writer. It opens one WAL-mode connection at
+construction and writes all dynamic tables atomically per record interval
+(`record_interval` must be a multiple of `dt`). Transport edges are sliced
+into fixed-length cells (`RECORDER_CELL_LENGTH_M`) for spatial snapshots of
+pocket contents. The worker closes the recorder at the end of `run()`. GUI
+readers must use their own read-only connections.
+
+## Server / CLI
+
+`chemunited-sim <project> [--port] [--db]` starts a FastAPI server
+(uvicorn, default port 1472) that loads a project folder or `.chemunited`
+ZIP, runs the worker in a background thread, and exposes endpoints to load
+projects, start/stop simulations, send runtime component commands, and query
+status. Each run writes its own SQLite database (and log file) under the
+`--db` directory.

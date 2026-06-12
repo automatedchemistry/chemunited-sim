@@ -1,6 +1,6 @@
-"""Integration tests for the full_platform server project.
+"""Integration tests for the flow_platform server project.
 
-Exercises all eight REST endpoints using the full_platform example project as
+Exercises all eight REST endpoints using the flow_platform example project as
 a fixture.  Follows the TestClient + server._state pattern established in
 test_visualization.py.
 """
@@ -20,7 +20,7 @@ from chemunited_sim.cli.clock import SimClock
 from chemunited_sim.cli.server import SimStatus, SimulationState, app
 from chemunited_sim.worker import SimConfig
 
-PROJECT_PATH = Path("tests") / "full_platform"
+PROJECT_PATH = Path("tests") / "flow_platform"
 
 REQUIRED_COMPONENTS = {
     "liquidpump",

@@ -28,14 +28,19 @@ from chemunited_core.components import (
     PumpData,
     VesselComponentData,
 )
-
 from chemunited_core.figure_registry.pumps import SyringePumpData
 from loguru import logger
 
 from ..adapter.models import HydraulicEdge, HydraulicGraph
 from ..hydraulics.models import HydraulicState
 from ..hydraulics.solver import solve
-from ..inventory.engine import HeatExchangeEntry, apply_heat_exchange, assimilate, emit, emit_from_sources
+from ..inventory.engine import (
+    HeatExchangeEntry,
+    apply_heat_exchange,
+    assimilate,
+    emit,
+    emit_from_sources,
+)
 from ..inventory.initialiser import build_inventory_states
 from ..inventory.models import InventoryState
 from ..inventory.port_map import PortAccessMap, build_port_map
@@ -252,7 +257,9 @@ class Worker:
         self._bpr_entries: list[_BprEntry] = _build_bpr_entries(graph, components)
         self._mfc_entries: list[_MfcEntry] = _build_mfc_entries(graph, components)
         self._pump_entries: list[_PumpEntry] = _build_pump_entries(graph, components)
-        self._heat_exchange_entries: list[HeatExchangeEntry] = _build_heat_exchange_entries(components)
+        self._heat_exchange_entries: list[HeatExchangeEntry] = (
+            _build_heat_exchange_entries(components)
+        )
 
         self._t: float = 0.0
         self._hyd_state: HydraulicState | None = None
@@ -353,14 +360,20 @@ class Worker:
         apply(self._inv_states, self._reactions_map, self._config.dt)
 
         # 6.5. Apply wall heat exchange
-        apply_heat_exchange(self._inv_states, self._heat_exchange_entries, self._config.dt)
+        apply_heat_exchange(
+            self._inv_states, self._heat_exchange_entries, self._config.dt
+        )
 
         # 7. Emit replacement pockets from inventories
         emitted = emit(self._inv_states, result.departures, self._port_map)
 
         # 7.5. Emit from FlowSource boundary components (infinite or finite syringe)
         source_emitted = emit_from_sources(
-            self._source_map, self._graph, hyd_state, self._syringe_actual, self._config.dt
+            self._source_map,
+            self._graph,
+            hyd_state,
+            self._syringe_actual,
+            self._config.dt,
         )
 
         # Track syringe withdraw (Q < 0 means fluid drawn back into syringe)
@@ -380,7 +393,7 @@ class Worker:
 
         # 8. Inject emitted pockets into transport queues
         self._transport_state = inject(
-            result.next_state, {**emitted, **source_emitted}, hyd_state
+            result.next_state, {**emitted, **source_emitted}, hyd_state, self._graph
         )
 
         # 9. Advance time

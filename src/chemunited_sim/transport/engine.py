@@ -9,14 +9,22 @@ correct inflow end, ready for the next call to :func:`advance`.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict, deque
 
 from chemunited_core.common.constant import R_MAX_HYDRAULIC
+from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components.enums import InternalEdgeRole
+from chemunited_core.compounds.entity import IDEAL_GAS_CONSTANT
 from loguru import logger
 
 from ..adapter.models import HydraulicEdge, HydraulicGraph
-from ..common.constant import MAX_JUNCTION_HOPS, MIN_POCKET_VOLUME
+from ..common.constant import (
+    AMBIENT_TEMPERATURE_K,
+    ATMOSPHERE_PRESSURE_PA,
+    MAX_JUNCTION_HOPS,
+    MIN_POCKET_VOLUME,
+)
 from ..hydraulics.models import HydraulicState
 from .junction import merge_arriving_pockets
 from .models import Pocket, TransportResult, TransportState
@@ -120,15 +128,116 @@ def _build_indices(
     return junction_neighbors, transport_by_node
 
 
+def _outgoing_transport_dv(
+    node_id: str,
+    hyd_state: HydraulicState,
+    dt: float,
+    transport_by_node: dict[str, list[tuple[str, HydraulicEdge]]],
+) -> dict[str, float]:
+    """Return outgoing transport-edge displaced volumes from *node_id*."""
+    outgoing: dict[str, float] = {}
+    for edge_id, edge in transport_by_node.get(node_id, []):
+        Q = hyd_state.flows.get(edge_id, 0.0)
+        away_from_node = (edge.origin_node_id == node_id and Q > MIN_POCKET_VOLUME) or (
+            edge.destination_node_id == node_id and Q < -MIN_POCKET_VOLUME
+        )
+        if away_from_node:
+            dV = abs(Q) * dt
+            if dV >= MIN_POCKET_VOLUME:
+                outgoing[edge_id] = dV
+    return outgoing
+
+
+def _stage_transport_injections(
+    pocket: Pocket,
+    outgoing_dv: dict[str, float],
+    staged: dict[str, list[Pocket]],
+) -> None:
+    """Split *pocket* across outgoing transport edges for later injection."""
+    total_out = sum(outgoing_dv.values())
+    if total_out < MIN_POCKET_VOLUME:
+        return
+
+    for edge_id, dV in outgoing_dv.items():
+        frac = dV / total_out
+        fragment = _scale_pocket(pocket, frac)
+        if fragment.volume >= MIN_POCKET_VOLUME:
+            staged[edge_id].append(fragment)
+
+
+def _inject_staged_transport(
+    new_queues: dict[str, deque[Pocket]],
+    staged: dict[str, list[Pocket]],
+    hyd_state: HydraulicState,
+) -> None:
+    """Inject staged pass-through pockets into transport queues."""
+    for edge_id, pockets in staged.items():
+        queue = new_queues.get(edge_id)
+        if queue is None:
+            continue
+        Q = hyd_state.flows.get(edge_id, 0.0)
+        for pocket in pockets:
+            if Q >= 0:
+                queue.append(pocket)
+            else:
+                queue.appendleft(pocket)
+
+
+def _edge_capacity(edge: HydraulicEdge) -> float:
+    """Return geometric capacity for a transport edge."""
+    if edge.length <= 0.0 or edge.diameter <= 0.0:
+        return 0.0
+    return math.pi * (edge.diameter / 2.0) ** 2 * edge.length
+
+
+def _fill_carrier_deficits(
+    graph: HydraulicGraph,
+    new_queues: dict[str, deque[Pocket]],
+    hyd_state: HydraulicState,
+) -> None:
+    """Pad underfilled transport edges with air carrier pockets."""
+    for edge_id, queue in new_queues.items():
+        edge = graph.edges.get(edge_id)
+        if edge is None or edge.role != InternalEdgeRole.TRANSPORT:
+            continue
+        capacity = _edge_capacity(edge)
+        if capacity <= 0.0:
+            continue
+
+        volume = sum(p.volume for p in queue)
+        deficit = capacity - volume
+        if deficit < MIN_POCKET_VOLUME:
+            continue
+
+        Q = hyd_state.flows.get(edge_id, 0.0)
+        inflow_node_id = edge.origin_node_id if Q >= 0.0 else edge.destination_node_id
+        pressure = hyd_state.pressures.get(inflow_node_id, ATMOSPHERE_PRESSURE_PA)
+        n_air = pressure * deficit / (IDEAL_GAS_CONSTANT * AMBIENT_TEMPERATURE_K)
+        carrier = Pocket(
+            phase_kind=PhaseKind.GAS,
+            volume=deficit,
+            species_moles={"air": n_air},
+            temperature=AMBIENT_TEMPERATURE_K,
+            pressure=pressure,
+        )
+        if Q >= 0.0:
+            queue.append(carrier)
+        else:
+            queue.appendleft(carrier)
+
+
 def _route_pocket(
     pocket: Pocket,
     node_id: str,
     junction_neighbors: dict[str, list[tuple[str, HydraulicEdge]]],
+    transport_by_node: dict[str, list[tuple[str, HydraulicEdge]]],
     inventory_nodes: set[str],
     hub_nodes: set[str],
     arrivals: dict[str, list[Pocket]],
     hub_staging: dict[str, list[Pocket]],
+    transport_staging: dict[str, list[Pocket]],
     hyd_state: HydraulicState,
+    dt: float,
 ) -> None:
     """Route a pocket to its final destination, following JUNCTION edges.
 
@@ -172,10 +281,17 @@ def _route_pocket(
                 next_node = neighbor_id
                 break
 
-        if next_node is None:
-            # Dead end — pocket absorbed by boundary component.
+        if next_node is not None:
+            current = next_node
+            continue
+
+        outgoing_dv = _outgoing_transport_dv(current, hyd_state, dt, transport_by_node)
+        if outgoing_dv:
+            _stage_transport_injections(pocket, outgoing_dv, transport_staging)
             return
-        current = next_node
+
+        # Dead end: pocket absorbed by boundary component.
+        return
 
     logger.warning(
         "Pocket routing exceeded {} JUNCTION hops from node '{}' - pocket discarded.",
@@ -341,6 +457,7 @@ def advance(
 
     arrivals: dict[str, list[Pocket]] = defaultdict(list)
     hub_staging: dict[str, list[Pocket]] = defaultdict(list)
+    transport_staging: dict[str, list[Pocket]] = defaultdict(list)
     departures: dict[str, float] = {}
 
     # ------------------------------------------------------------------
@@ -377,15 +494,20 @@ def advance(
                 pocket,
                 exit_node_id,
                 junction_neighbors,
+                transport_by_node,
                 inventory_nodes,
                 hub_nodes,
                 arrivals,
                 hub_staging,
+                transport_staging,
                 hyd_state,
+                dt,
             )
 
         if _connects_to_inventory(inflow_node_id, graph, junction_neighbors):
             departures[eid] = dV
+
+    _inject_staged_transport(new_queues, transport_staging, hyd_state)
 
     # ------------------------------------------------------------------
     # Pass 2: Hub merging and distribution
@@ -420,6 +542,7 @@ def inject(
     state: TransportState,
     emitted: dict[str, Pocket],
     hyd_state: HydraulicState,
+    graph: HydraulicGraph | None = None,
 ) -> TransportState:
     """Inject inventory-emitted pockets into transport edge queues.
 
@@ -441,6 +564,10 @@ def inject(
     hyd_state:
         Flows from the most recent hydraulic solve, used to determine which
         end of the edge is the inflow end.
+    graph:
+        Optional compiled graph.  When provided, underfilled transport edges
+        are padded with air carrier pockets to preserve the always-filled
+        edge invariant.
 
     Returns
     -------
@@ -460,5 +587,8 @@ def inject(
             queue.append(pocket)
         else:
             queue.appendleft(pocket)
+
+    if graph is not None:
+        _fill_carrier_deficits(graph, new_queues, hyd_state)
 
     return TransportState(edge_queues=new_queues)

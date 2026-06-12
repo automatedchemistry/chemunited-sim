@@ -1,5 +1,6 @@
 """Platform setup: gas-liquid pressurised flow-through reactor."""
 
+from chemunited_core.components.enums import PortAccess
 from chemunited_core.compounds import VolumeContentBase
 
 
@@ -25,14 +26,12 @@ def build_draw(platform) -> None:
         syringe_actual_volume="50 ml",
     )
     platform.add_component(
-        name="liquidrecicly", 
-        figure="GlassBottle", 
-        heat_exchange=True, 
-        surface_temperature="315 K"
+        name="liquidrecicly",
+        figure="GlassBottle",
+        heat_exchange=True,
+        surface_temperature="315 K",
     )
-    platform.add_component(
-        name="pump", figure="HPLCPump"
-    )
+    platform.add_component(name="pump", figure="HPLCPump")
     platform.add_component(name="productsink", figure="Sink")
     platform.add_component(name="wastesink", figure="Sink")
     platform.add_component(
@@ -43,13 +42,16 @@ def build_draw(platform) -> None:
         name="reactor",
         figure="GlassBottle",
         capacity="10 ml",
-        top_access=2,
-        bottom_access=1,
+        top_access=1,
+        bottom_access=2,
         pressure_access=True,
-        heat_exchange=True, 
+        heat_exchange=True,
         surface_temperature="315 K",
-        heat_transfer_coefficient ="100 W/(m^2*K)"
+        heat_transfer_coefficient="100 W/(m^2*K)",
     )
+    platform["reactor"].ports_by_number[1].access = PortAccess.BOTTOM
+    platform["reactor"].ports_by_number[2].access = PortAccess.BOTTOM
+    platform["reactor"].ports_by_number[3].access = PortAccess.TOP
     platform.add_component(
         name="bpr", figure="BackPressureRegulator", setpoint="1.2 bar"
     )

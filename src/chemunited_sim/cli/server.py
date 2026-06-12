@@ -655,7 +655,11 @@ def get_simulation_visualization() -> dict:
             components=state.project.components.values(),
             snapshot=snapshot,
         )
-        dashboard_html = render_dashboard_html(state.db_path)
+        dashboard_html = render_dashboard_html(
+            state.db_path,
+            graph=state.project.graph,
+            components=state.project.components.values(),
+        )
     except NoSnapshotsError as exc:
         raise HTTPException(409, str(exc)) from exc
     except SnapshotReadError as exc:

@@ -12,13 +12,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from chemunited_core.common.enums import PhaseKind
+from chemunited_core.components.enums import PortAccess
 from chemunited_core.compounds import COMPOUNDS
 from chemunited_core.compounds.entity import IDEAL_GAS_CONSTANT
-from chemunited_core.components.enums import PortAccess
 from loguru import logger
 
 from ..adapter.models import HydraulicGraph
-from ..common.constant import AMBIENT_TEMPERATURE_K, ATMOSPHERE_PRESSURE_PA, MIN_POCKET_VOLUME
+from ..common.constant import (
+    AMBIENT_TEMPERATURE_K,
+    ATMOSPHERE_PRESSURE_PA,
+    MIN_POCKET_VOLUME,
+)
 from ..hydraulics.models import HydraulicState
 from ..transport.models import Pocket
 from .models import InventoryState
@@ -61,9 +65,9 @@ class HeatExchangeEntry:
     """
 
     inv_node_id: str
-    U: float          # overall heat transfer coefficient, W/(m²·K)
+    U: float  # overall heat transfer coefficient, W/(m²·K)
     contact_area: float  # wetted surface area, m²
-    T_wall: float     # jacket / wall temperature, K
+    T_wall: float  # jacket / wall temperature, K
 
 
 def apply_heat_exchange(
@@ -84,10 +88,9 @@ def apply_heat_exchange(
         state = states.get(entry.inv_node_id)
         if state is None:
             continue
-        c_thermal = (
-            _thermal_mass(state.liq_species_moles, PhaseKind.LIQUID)
-            + _thermal_mass(state.gas_species_moles, PhaseKind.GAS)
-        )
+        c_thermal = _thermal_mass(
+            state.liq_species_moles, PhaseKind.LIQUID
+        ) + _thermal_mass(state.gas_species_moles, PhaseKind.GAS)
         if c_thermal <= 0.0:
             continue
         q_dot = entry.U * entry.contact_area * (entry.T_wall - state.temperature)
@@ -158,26 +161,35 @@ def assimilate(
                     pocket.species_moles,
                 )
 
-        # Blend temperature — thermal-mass weighted (n·Cp), volume fallback for untracked carrier
+        # Blend temperature by thermal mass; fall back to volume for carrier.
         if v_arriving > 0.0:
-            c_before = (
-                _thermal_mass(arrival_state.liq_species_moles, PhaseKind.LIQUID)
-                + _thermal_mass(arrival_state.gas_species_moles, PhaseKind.GAS)
+            c_before = _thermal_mass(
+                arrival_state.liq_species_moles, PhaseKind.LIQUID
+            ) + _thermal_mass(arrival_state.gas_species_moles, PhaseKind.GAS)
+            c_arriving = sum(
+                _thermal_mass(p.species_moles, p.phase_kind) for p in pockets
             )
-            c_arriving = sum(_thermal_mass(p.species_moles, p.phase_kind) for p in pockets)
             total_c = c_before + c_arriving
 
             if total_c > 0.0:
-                h_arriving = sum(_thermal_mass(p.species_moles, p.phase_kind) * p.temperature for p in pockets)
-                arrival_state.temperature = (c_before * arrival_state.temperature + h_arriving) / total_c
+                h_arriving = sum(
+                    _thermal_mass(p.species_moles, p.phase_kind) * p.temperature
+                    for p in pockets
+                )
+                arrival_state.temperature = (
+                    c_before * arrival_state.temperature + h_arriving
+                ) / total_c
             else:
                 logger.warning(
-                    "No tracked species in vessel {} or arriving pockets — falling back to volume-weighted temperature blend.",
+                    "No tracked species in vessel {} or arriving pockets - "
+                    "falling back to volume-weighted temperature blend.",
                     inv_node_id,
                 )
                 total = v_before + v_arriving
                 t_arriving = sum(p.temperature * p.volume for p in pockets) / v_arriving
-                arrival_state.temperature = (v_before * arrival_state.temperature + v_arriving * t_arriving) / total
+                arrival_state.temperature = (
+                    v_before * arrival_state.temperature + v_arriving * t_arriving
+                ) / total
 
 
 def emit(
@@ -203,8 +215,8 @@ def emit(
     **Phase availability**: the vessel-is-always-full principle means phase
     runout should not occur in a correctly configured network.  If it does
     (e.g. a vessel starts all-gas and liquid is requested), a warning is
-    logged and the pocket is capped at the available volume.  Pockets below
-    ``MIN_POCKET_VOLUME`` are not emitted.
+    logged and the unavailable volume is emitted as carrier so transport
+    edges remain filled.
 
     Parameters
     ----------
@@ -246,37 +258,41 @@ def emit(
             available = state.liq_volume
             species = state.liq_species_moles
 
-        if available < MIN_POCKET_VOLUME:
-            continue  # phase is fully absent — nothing to emit
-
         if available < dV:
             logger.warning(
                 "emit: inventory node '{}' phase {} available={:.3e} m^3 < "
-                "requested dV={:.3e} m^3 - emitting available volume only. "
-                "Check vessel initial conditions.",
+                "requested dV={:.3e} m^3 - filling deficit with carrier. "
+                "Check vessel initial conditions and port access.",
                 entry.inv_node_id,
                 "GAS" if entry.access == PortAccess.TOP else "LIQUID",
                 available,
                 dV,
             )
-            emit_vol = available
+            inventory_vol = max(0.0, available)
         else:
-            emit_vol = dV
+            inventory_vol = dV
 
-        fraction = emit_vol / available
-        emit_species = {k: v * fraction for k, v in species.items()}
+        emit_species: dict[str, float] = {}
+        if inventory_vol > 0.0 and available > 0.0:
+            fraction = inventory_vol / available
+            emit_species = {k: v * fraction for k, v in species.items()}
 
-        # Remove emitted fraction from inventory in-place
-        for k in list(species):
-            species[k] *= 1.0 - fraction
+            # Remove emitted fraction from inventory in-place.
+            for k in list(species):
+                species[k] *= 1.0 - fraction
         if entry.access == PortAccess.TOP:
-            state.gas_volume -= emit_vol
+            state.gas_volume = max(0.0, state.gas_volume - inventory_vol)
         else:
-            state.liq_volume -= emit_vol
+            state.liq_volume = max(0.0, state.liq_volume - inventory_vol)
+
+        deficit = dV - inventory_vol
+        if phase == PhaseKind.GAS and deficit > 0.0:
+            n_air = state.pressure * deficit / (IDEAL_GAS_CONSTANT * state.temperature)
+            emit_species["air"] = emit_species.get("air", 0.0) + n_air
 
         emitted[edge_id] = Pocket(
             phase_kind=phase,
-            volume=emit_vol,
+            volume=dV,
             species_moles=emit_species,
             temperature=state.temperature,
             pressure=state.pressure,
@@ -320,7 +336,9 @@ def emit_from_sources(
     dict[str, Pocket]
         ``{edge_id: Pocket}`` — one pocket per source edge with nonzero flow.
     """
-    from chemunited_core.figure_registry.pumps import SyringePumpData  # local to avoid circular
+    from chemunited_core.figure_registry.pumps import (
+        SyringePumpData,  # local to avoid circular
+    )
 
     emitted: dict[str, Pocket] = {}
 
@@ -381,8 +399,7 @@ def emit_from_sources(
                 liq = inv_node.liq_content if inv_node is not None else None
                 if liq is not None and liq.volume > 0 and liq.initial_species:
                     species_moles = {
-                        k: (n / liq.volume) * dV
-                        for k, n in liq.initial_species.items()
+                        k: (n / liq.volume) * dV for k, n in liq.initial_species.items()
                     }
                     emitted[edge_id] = Pocket(
                         phase_kind=PhaseKind.LIQUID,
@@ -406,8 +423,7 @@ def emit_from_sources(
                 gas = inv_node.gas_content if inv_node is not None else None
                 if gas is not None and gas.volume > 0 and gas.initial_species:
                     species_moles = {
-                        k: (n / gas.volume) * dV
-                        for k, n in gas.initial_species.items()
+                        k: (n / gas.volume) * dV for k, n in gas.initial_species.items()
                     }
                 else:
                     n_air = P / (IDEAL_GAS_CONSTANT * AMBIENT_TEMPERATURE_K)
