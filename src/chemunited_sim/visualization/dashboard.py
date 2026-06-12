@@ -340,9 +340,7 @@ def _read_cell_profiles(conn: sqlite3.Connection) -> dict[str, Any]:
                 "edgeId": edge_id,
                 "cellCount": len(cells),
                 "xLabel": (
-                    "Cell position (m)"
-                    if edge_id in geometry
-                    else "Cell index"
+                    "Cell position (m)" if edge_id in geometry else "Cell index"
                 ),
                 "cells": cells,
                 "phases": edge_phases,
@@ -433,7 +431,9 @@ def _build_html(
             "flows": "No edge flow traces were recorded.",
             "inventories": "No inventory state traces were recorded.",
             "species": "No tracked inventory species were recorded.",
-            "temperatures": "No edge cell temperature traces were recorded.",
+            "temperatures": (
+                "No inventory or edge cell temperature traces were recorded."
+            ),
             "cells": "No pipe-cell state or content rows were recorded.",
         },
     }
@@ -441,6 +441,9 @@ def _build_html(
     safe_stem = html.escape(stem)
     meta_rows = _render_meta_rows(meta)
     metric_cards = _render_metric_cards(summary["metrics"])
+    temperatures_tab = _render_chart_tab(
+        "temperatures", "Search temperature traces", show_flat_default=True
+    )
     payload_json = _json_script_payload(payload)
     t_min = summary["timeStart"]
     t_max = summary["timeEnd"]
@@ -727,7 +730,7 @@ def _build_html(
   {_render_chart_tab("flows", "Search flow traces")}
   {_render_chart_tab("inventories", "Search inventory traces")}
   {_render_chart_tab("species", "Search species traces")}
-  {_render_chart_tab("temperatures", "Search temperature traces")}
+  {temperatures_tab}
   {_render_cell_tab()}
 </main>
 <script id="dashboard-data" type="application/json">{payload_json}</script>
@@ -743,10 +746,16 @@ def _build_html(
     "#0f766e", "#c2410c", "#4a5568", "#7c3aed", "#0369a1"
   ];
   const latestCellTime = cellTimes.length ? cellTimes[cellTimes.length - 1].key : "";
+  function defaultShowFlat(tab) {{
+    return tab === "temperatures";
+  }}
   const state = {{
     activeTab: "overview",
     query: Object.fromEntries(chartTabs.map((tab) => [tab, ""])),
-    showFlat: Object.fromEntries(chartTabs.map((tab) => [tab, false])),
+    showFlat: Object.fromEntries(chartTabs.map((tab) => [
+      tab,
+      defaultShowFlat(tab)
+    ])),
     cellQuery: "",
     cellTimeKey: latestCellTime,
     visibility: {{}}
@@ -1285,9 +1294,9 @@ def _build_html(
     }});
     reset.addEventListener("click", () => {{
       state.query[tab] = "";
-      state.showFlat[tab] = false;
+      state.showFlat[tab] = defaultShowFlat(tab);
       input.value = "";
-      flatToggle.checked = false;
+      flatToggle.checked = defaultShowFlat(tab);
       payload.charts
         .filter((chart) => chart.tab === tab)
         .forEach((chart) => chart.traces.forEach((trace) => {{
@@ -1361,7 +1370,7 @@ def _build_charts(
     charts.append(
         _make_line_chart(
             chart_id="inv_temperatures",
-            tab="inventories",
+            tab="temperatures",
             title="Inventory Temperatures",
             series={
                 nid: ([t for t, _, _ in pts], [temp for _, _, temp in pts])
@@ -1616,9 +1625,12 @@ def _render_meta_rows(meta: dict[str, str]) -> str:
     )
 
 
-def _render_chart_tab(tab: str, search_placeholder: str) -> str:
+def _render_chart_tab(
+    tab: str, search_placeholder: str, *, show_flat_default: bool = False
+) -> str:
     safe_tab = html.escape(tab)
     safe_placeholder = html.escape(search_placeholder)
+    checked = " checked" if show_flat_default else ""
     return f"""
   <section class="tab-panel" data-panel="{safe_tab}">
     <div class="toolbar">
@@ -1629,7 +1641,7 @@ def _render_chart_tab(tab: str, search_placeholder: str) -> str:
         placeholder="{safe_placeholder}"
       >
       <label class="checkbox-label">
-        <input data-show-flat="{safe_tab}" type="checkbox">
+        <input data-show-flat="{safe_tab}" type="checkbox"{checked}>
         Show flat traces
       </label>
       <button class="control-button" data-reset-tab="{safe_tab}">Reset tab</button>

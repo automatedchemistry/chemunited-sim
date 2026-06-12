@@ -255,6 +255,11 @@ def test_render_dashboard_html_builds_analysis_cockpit_payload(workspace_tmp):
         "inventories",
         "temperatures",
     }
+    inv_temp_chart = next(
+        chart for chart in payload["charts"] if chart["id"] == "inv_temperatures"
+    )
+    assert inv_temp_chart["tab"] == "temperatures"
+    assert '<input data-show-flat="temperatures" type="checkbox" checked>' in html
 
 
 def test_render_dashboard_html_hides_flat_traces_by_default(workspace_tmp):
