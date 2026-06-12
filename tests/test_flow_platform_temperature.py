@@ -11,15 +11,22 @@ import time
 from pathlib import Path
 
 import pytest
+from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components.enums import InternalEdgeRole, PortAccess
 from fastapi.testclient import TestClient
+from loguru import logger
 
 from chemunited_sim.cli import server
 from chemunited_sim.cli.clock import SimClock
 from chemunited_sim.cli.loader import load_project
 from chemunited_sim.cli.server import SimStatus, SimulationState, app
+from chemunited_sim.hydraulics.models import HydraulicState
+from chemunited_sim.inventory.engine import assimilate, emit_from_sources
+from chemunited_sim.inventory.initialiser import build_inventory_states
 from chemunited_sim.inventory.port_map import build_port_map
-from chemunited_sim.worker import SimConfig
+from chemunited_sim.inventory.source_map import build_source_map
+from chemunited_sim.transport.models import Pocket
+from chemunited_sim.worker import SimConfig, Worker
 
 PROJECT_PATH = Path("tests") / "flow_platform"
 
@@ -66,9 +73,136 @@ def _dashboard_payload(html_text: str) -> dict:
 def test_reactor_liquid_path_uses_bottom_ports():
     project = load_project(PROJECT_PATH)
     port_map = build_port_map(project.graph, list(project.components.values()))
+    source_map = build_source_map(project.graph, list(project.components.values()))
 
     assert port_map["reactortube_2_reactor_2"].access == PortAccess.BOTTOM
     assert port_map["reactor_1_bpr_1"].access == PortAccess.BOTTOM
+    assert "liquidpump_1_tmixer_2" not in port_map
+    assert "liquidpump_1_tmixer_2" in source_map
+
+
+def test_liquidpump_source_emits_from_runtime_inventory():
+    project = load_project(PROJECT_PATH)
+    states = build_inventory_states(project.graph)
+    source_map = build_source_map(project.graph, list(project.components.values()))
+    state = states["liquidpump.Inventory"]
+    initial_volume = state.liq_volume
+    initial_solvent = state.liq_species_moles["solvent"]
+
+    emitted = emit_from_sources(
+        source_map,
+        project.graph,
+        HydraulicState(
+            pressures={"liquidpump.1": 101_325.0},
+            flows={"liquidpump_1_tmixer_2": 1.0e-8},
+        ),
+        states,
+        dt=0.5,
+    )
+
+    pocket = emitted["liquidpump_1_tmixer_2"]
+    assert pocket.phase_kind == PhaseKind.LIQUID
+    assert pocket.volume == pytest.approx(5.0e-9)
+    assert pocket.species_moles["reagent_a"] > 0.0
+    assert pocket.species_moles["solvent"] > 0.0
+    assert state.liq_volume == pytest.approx(initial_volume - 5.0e-9)
+    assert state.liq_species_moles["solvent"] < initial_solvent
+
+
+def test_liquidpump_source_uses_carrier_only_after_runtime_inventory_runs_dry():
+    project = load_project(PROJECT_PATH)
+    states = build_inventory_states(project.graph)
+    source_map = build_source_map(project.graph, list(project.components.values()))
+    state = states["liquidpump.Inventory"]
+    state.liq_volume = 2.0e-9
+    state.liq_species_moles = {"solvent": 3.0}
+    messages = []
+    handler_id = logger.add(
+        lambda message: messages.append(str(message)),
+        level="WARNING",
+        format="{message}",
+    )
+
+    try:
+        emitted = emit_from_sources(
+            source_map,
+            project.graph,
+            HydraulicState(
+                pressures={"liquidpump.1": 101_325.0},
+                flows={"liquidpump_1_tmixer_2": 1.0e-8},
+            ),
+            states,
+            dt=0.5,
+        )
+    finally:
+        logger.remove(handler_id)
+
+    pocket = emitted["liquidpump_1_tmixer_2"]
+    assert pocket.phase_kind == PhaseKind.LIQUID
+    assert pocket.volume == pytest.approx(5.0e-9)
+    assert pocket.species_moles == {"solvent": pytest.approx(3.0)}
+    assert state.liq_volume == pytest.approx(0.0)
+    assert any("SyringePump 'liquidpump' ran dry" in message for message in messages)
+
+
+def test_liquidpump_withdraw_assimilates_into_runtime_inventory():
+    project = load_project(PROJECT_PATH)
+    states = build_inventory_states(project.graph)
+    source_map = build_source_map(project.graph, list(project.components.values()))
+    state = states["liquidpump.Inventory"]
+    initial_volume = state.liq_volume
+
+    emitted = emit_from_sources(
+        source_map,
+        project.graph,
+        HydraulicState(
+            pressures={"liquidpump.1": 101_325.0},
+            flows={"liquidpump_1_tmixer_2": -1.0e-8},
+        ),
+        states,
+        dt=0.5,
+    )
+    assimilate(
+        states,
+        {
+            "liquidpump.Inventory": [
+                Pocket(
+                    phase_kind=PhaseKind.LIQUID,
+                    volume=5.0e-9,
+                    species_moles={"product_b": 2.0e-6},
+                    temperature=310.0,
+                    pressure=101_325.0,
+                )
+            ]
+        },
+        HydraulicState(
+            pressures={"liquidpump.Inventory": 101_325.0},
+            flows={},
+        ),
+        variable_volume_inventory_ids={"liquidpump.Inventory"},
+    )
+
+    assert emitted == {}
+    assert state.liq_volume == pytest.approx(initial_volume + 5.0e-9)
+    assert state.liq_species_moles["product_b"] == pytest.approx(2.0e-6)
+
+
+def test_worker_initialises_liquidpump_inventory_from_actual_syringe_volume():
+    project = load_project(PROJECT_PATH)
+    worker = Worker(project.graph, list(project.components.values()), SimConfig())
+    state = worker.inv_states["liquidpump.Inventory"]
+    comp = project.components["liquidpump"]
+    template = project.graph.inventory_nodes["liquidpump.Inventory"].liq_content
+    actual_volume = comp.syringe_actual_volume.to_base_units().magnitude
+
+    assert state.capacity == pytest.approx(
+        comp.syringe_volume.to_base_units().magnitude
+    )
+    assert state.liq_volume == pytest.approx(actual_volume)
+    assert state.gas_volume == pytest.approx(0.0)
+    assert state.liq_species_moles["solvent"] == pytest.approx(
+        template.initial_species["solvent"] / template.volume * actual_volume
+    )
 
 
 def test_mode1_latest_snapshot_keeps_all_transport_edges(workspace_tmp):
@@ -81,6 +215,13 @@ def test_mode1_latest_snapshot_keeps_all_transport_edges(workspace_tmp):
         clock=SimClock(),
         cmd_queue=queue.Queue(),
         db_dir=workspace_tmp,
+    )
+
+    messages = []
+    handler_id = logger.add(
+        lambda message: messages.append(str(message)),
+        level="WARNING",
+        format="{message}",
     )
 
     try:
@@ -140,8 +281,20 @@ def test_mode1_latest_snapshot_keeps_all_transport_edges(workspace_tmp):
                     (latest,),
                 )
             )
+            liquidrecicly_volumes = dict(
+                conn.execute(
+                    """
+                    SELECT phase, MAX(volume)
+                    FROM inventory_content
+                    WHERE time = ? AND node_id = 'liquidrecicly.Inventory'
+                    GROUP BY phase
+                    """,
+                    (latest,),
+                )
+            )
 
         assert latest_cell_edges == expected_transport_edges
+        assert sum(liquidrecicly_volumes.values()) == pytest.approx(10.0e-6)
         component_ids = {
             component["id"] for component in dashboard_payload["components"]
         }
@@ -159,9 +312,33 @@ def test_mode1_latest_snapshot_keeps_all_transport_edges(workspace_tmp):
                 edge for edge in dashboard_payload["edges"] if edge["id"] == edge_id
             )
             signal_titles = {group["title"] for group in edge_payload["signals"]}
-            assert {"Flow rate", "Average cell temperature"} <= signal_titles
+            assert {
+                "Flow rate",
+                "Average cell temperature",
+                "Average cell content",
+            } <= signal_titles
+            content_group = next(
+                group
+                for group in edge_payload["signals"]
+                if group["title"] == "Average cell content"
+            )
+            trace_names = {trace["name"] for trace in content_group["traces"]}
+            assert {
+                "liquid / solvent",
+                "liquid / reagent_a",
+                "liquid / product_b",
+            } & trace_names
         assert "average cell temperature" in graph_text
         assert "component-explorer" in dashboard_text
         assert "edge-explorer" in dashboard_text
+        assert not any(
+            "liquidpump.Inventory" in message and "carrier" in message
+            for message in messages
+        )
+        assert not any(
+            "liquidrecicly.Inventory" in message and "carrier" in message
+            for message in messages
+        )
     finally:
+        logger.remove(handler_id)
         _stop_background_threads()

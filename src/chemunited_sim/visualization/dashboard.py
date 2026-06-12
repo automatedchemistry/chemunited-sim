@@ -469,6 +469,7 @@ def _build_element_payload(
     ]
 
     profile_by_edge = {edge["edgeId"]: edge for edge in cell_profiles.get("edges", [])}
+    cell_times = cell_profiles.get("times", [])
     edge_ids = set(edge_flows) | set(cell_temps) | set(profile_by_edge)
     if graph is not None:
         edge_ids.update(graph.edges)
@@ -480,6 +481,7 @@ def _build_element_payload(
             edge_flows=edge_flows,
             cell_temps=cell_temps,
             cell_profile=profile_by_edge.get(edge_id),
+            cell_times=cell_times,
         )
         for edge_id in sorted(edge_ids)
     ]
@@ -580,6 +582,7 @@ def _edge_payload(
     edge_flows: dict[str, list],
     cell_temps: dict[str, list],
     cell_profile: dict[str, Any] | None,
+    cell_times: list[dict[str, Any]],
 ) -> dict[str, Any]:
     edge = graph.edges.get(edge_id) if graph is not None else None
     origin = edge.origin_node_id if edge is not None else None
@@ -599,6 +602,15 @@ def _edge_payload(
                 "Average cell temperature",
                 "Temperature (K)",
                 [_trace_payload(edge_id, cell_temps[edge_id])],
+            )
+        )
+    content_traces = _cell_content_time_traces(cell_profile, cell_times)
+    if content_traces:
+        groups.append(
+            _signal_group(
+                "Average cell content",
+                "Mean moles per cell (mol)",
+                content_traces,
             )
         )
     endpoint_traces = [
@@ -623,6 +635,39 @@ def _edge_payload(
         "signals": groups,
         "cellProfile": cell_profile,
     }
+
+
+def _cell_content_time_traces(
+    cell_profile: dict[str, Any] | None,
+    cell_times: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not cell_profile:
+        return []
+    species = cell_profile.get("species", [])
+    snapshots = cell_profile.get("snapshots", {})
+    if not species or not snapshots:
+        return []
+
+    traces = []
+    cell_count = int(cell_profile.get("cellCount") or 0)
+    for item in species:
+        points = []
+        trace_key = item["key"]
+        for time_item in cell_times:
+            time_key = str(time_item["key"])
+            snapshot = snapshots.get(time_key)
+            if snapshot is None:
+                continue
+            values = snapshot.get("contents", {}).get(trace_key)
+            if values is None:
+                values = [0.0] * cell_count
+            if not values:
+                continue
+            mean_moles = sum(float(value or 0.0) for value in values) / len(values)
+            points.append((float(time_item["value"]), mean_moles))
+        if points:
+            traces.append(_trace_payload(str(item["name"]), points))
+    return traces
 
 
 def _signal_group(

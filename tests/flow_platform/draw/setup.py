@@ -22,12 +22,13 @@ def build_draw(platform) -> None:
     platform.add_component(
         name="liquidpump",
         figure="SyringePump",
-        syringe_volume="50 ml",
-        syringe_actual_volume="50 ml",
+        syringe_volume="5000 ml",
+        syringe_actual_volume="5000 ml",
     )
     platform.add_component(
         name="liquidrecicly",
         figure="GlassBottle",
+        capacity="10 ml",
         heat_exchange=True,
         surface_temperature="315 K",
     )
@@ -78,6 +79,22 @@ def build_draw(platform) -> None:
         phase_kind="LIQUID",
         volume=10e-6,
         initial_species={"reagent_a": 1e-4, "solvent": 3.4e-2},
+    )
+
+    platform["liquidrecicly"].internal_inventory.liq_content = VolumeContentBase(
+        phase_kind="LIQUID",
+        volume=10e-6,
+        initial_species={"solvent": 3.4e-2},
+        initial_pressure=101325.0,
+        initial_temperature=298.15,
+    )
+
+    platform["liquidrecicly"].internal_inventory.gas_content = VolumeContentBase(
+        phase_kind="GAS",
+        volume=0.0,
+        initial_species={},
+        initial_pressure=101325.0,
+        initial_temperature=298.15,
     )
 
     # ── Connections ────────────────────────────────────────────────────────────

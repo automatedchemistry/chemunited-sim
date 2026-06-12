@@ -342,6 +342,7 @@ def test_render_dashboard_html_includes_pipe_cell_profiles(workspace_tmp):
         INSERT INTO cell_content VALUES (0.0, 'e0', 0, 'liquid', 'water', 2.0);
         INSERT INTO cell_content VALUES (0.0, 'e0', 1, 'liquid', 'water', 0.5);
         INSERT INTO cell_content VALUES (0.0, 'e0', 1, 'gas', 'nitrogen', 0.25);
+        INSERT INTO cell_content VALUES (1.0, 'e0', 0, 'liquid', 'water', 1.0);
         """)
     conn.close()
 
@@ -351,7 +352,8 @@ def test_render_dashboard_html_includes_pipe_cell_profiles(workspace_tmp):
     assert 'data-tab="cells"' in html
     assert "Pipe Cells" in html
     assert payload["cellProfiles"]["times"] == [
-        {"key": "0", "value": 0.0, "label": "0 s"}
+        {"key": "0", "value": 0.0, "label": "0 s"},
+        {"key": "1", "value": 1.0, "label": "1 s"},
     ]
     edge = payload["cellProfiles"]["edges"][0]
     assert edge["edgeId"] == "e0"
@@ -371,6 +373,68 @@ def test_render_dashboard_html_includes_pipe_cell_profiles(workspace_tmp):
     )
     assert snapshot["contents"][water_key] == pytest.approx([2.0, 0.5])
     assert snapshot["contents"][nitrogen_key] == pytest.approx([0.0, 0.25])
+    assert edge["snapshots"]["1"]["contents"][water_key] == pytest.approx([1.0, 0.0])
+    assert edge["snapshots"]["1"]["contents"][nitrogen_key] == pytest.approx([0.0, 0.0])
+
+    edge_payload = payload["edges"][0]
+    content_group = next(
+        group
+        for group in edge_payload["signals"]
+        if group["title"] == "Average cell content"
+    )
+    assert content_group["yLabel"] == "Mean moles per cell (mol)"
+    content_traces = {trace["name"]: trace for trace in content_group["traces"]}
+    assert set(content_traces) == {"gas / nitrogen", "liquid / water"}
+    assert content_traces["liquid / water"]["x"] == pytest.approx([0.0, 1.0])
+    assert content_traces["liquid / water"]["y"] == pytest.approx([1.25, 0.5])
+    assert content_traces["gas / nitrogen"]["y"] == pytest.approx([0.125, 0.0])
+
+
+def test_render_dashboard_html_averages_cell_content_without_geometry(workspace_tmp):
+    db_path = workspace_tmp / "content_without_geometry.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE meta (key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE node_pressure (
+            time REAL NOT NULL,
+            node_id TEXT NOT NULL,
+            pressure REAL NOT NULL
+        );
+        CREATE TABLE edge_flow (
+            time REAL NOT NULL,
+            edge_id TEXT NOT NULL,
+            flow_rate REAL NOT NULL
+        );
+        CREATE TABLE cell_content (
+            time REAL NOT NULL,
+            edge_id TEXT NOT NULL,
+            cell_index INTEGER NOT NULL,
+            phase TEXT NOT NULL,
+            species_id TEXT NOT NULL,
+            moles REAL NOT NULL
+        );
+        INSERT INTO meta VALUES ('platform_name', 'content');
+        INSERT INTO node_pressure VALUES (0.0, 'n0', 101325.0);
+        INSERT INTO edge_flow VALUES (0.0, 'e0', 0.0);
+        INSERT INTO cell_content VALUES (0.0, 'e0', 0, 'liquid', 'solvent', 2.0);
+        INSERT INTO cell_content VALUES (1.0, 'e0', 0, 'liquid', 'solvent', 1.0);
+        INSERT INTO cell_content VALUES (1.0, 'e0', 1, 'liquid', 'solvent', 3.0);
+        """)
+    conn.close()
+
+    payload = _dashboard_payload(render_dashboard_html(db_path))
+    edge_payload = payload["edges"][0]
+    content_group = next(
+        group
+        for group in edge_payload["signals"]
+        if group["title"] == "Average cell content"
+    )
+    trace = content_group["traces"][0]
+
+    assert payload["cellProfiles"]["edges"][0]["xLabel"] == "Cell index"
+    assert trace["name"] == "liquid / solvent"
+    assert trace["x"] == pytest.approx([0.0, 1.0])
+    assert trace["y"] == pytest.approx([1.0, 2.0])
 
 
 def test_render_dashboard_html_escapes_metadata(workspace_tmp):

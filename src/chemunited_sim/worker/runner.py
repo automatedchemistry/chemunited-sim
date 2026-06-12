@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from chemunited_core.common.constant import R_MAX_HYDRAULIC
+from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components import (
     BackPressureRegulatorData,
     ComponentData,
@@ -197,6 +198,130 @@ def _build_heat_exchange_entries(
     return entries
 
 
+def _syringe_phase(comp: SyringePumpData) -> PhaseKind:
+    return (
+        PhaseKind.LIQUID if getattr(comp, "direction_upward", True) else PhaseKind.GAS
+    )
+
+
+def _scale_species(
+    species_moles: dict[str, float],
+    template_volume: float,
+    target_volume: float,
+) -> dict[str, float]:
+    if template_volume <= 0.0 or target_volume <= 0.0:
+        return {}
+    return {
+        species_id: (moles / template_volume) * target_volume
+        for species_id, moles in species_moles.items()
+    }
+
+
+def _scale_phase(state: InventoryState, factor: float) -> None:
+    state.liq_volume *= factor
+    state.gas_volume *= factor
+    for species in (state.liq_species_moles, state.gas_species_moles):
+        for species_id in list(species):
+            species[species_id] *= factor
+
+
+def _initialise_syringe_inventory_states(
+    graph: HydraulicGraph,
+    source_map: SourceMap,
+    states: dict[str, InventoryState],
+) -> None:
+    seen: set[str] = set()
+    for entry in source_map.values():
+        if not isinstance(entry.comp, SyringePumpData):
+            continue
+        if entry.comp.name in seen:
+            continue
+        seen.add(entry.comp.name)
+
+        state = states.get(entry.inv_node_id)
+        inv_node = graph.inventory_nodes.get(entry.inv_node_id)
+        if state is None or inv_node is None:
+            continue
+
+        phase = _syringe_phase(entry.comp)
+        capacity = entry.comp.syringe_volume.to_base_units().magnitude
+        actual_volume = entry.comp.syringe_actual_volume.to_base_units().magnitude
+        if actual_volume > capacity:
+            logger.warning(
+                "worker: SyringePump '{}' actual volume {:.3e} m^3 exceeds "
+                "capacity {:.3e} m^3 - clamping.",
+                entry.comp.name,
+                actual_volume,
+                capacity,
+            )
+            actual_volume = capacity
+
+        state.capacity = capacity
+        if phase == PhaseKind.LIQUID:
+            content = inv_node.liq_content
+            state.liq_volume = actual_volume
+            state.gas_volume = 0.0
+            state.liq_species_moles = _scale_species(
+                dict(content.initial_species),
+                content.volume,
+                actual_volume,
+            )
+            state.gas_species_moles = {}
+        else:
+            content = inv_node.gas_content
+            state.gas_volume = actual_volume
+            state.liq_volume = 0.0
+            state.gas_species_moles = _scale_species(
+                dict(content.initial_species),
+                content.volume,
+                actual_volume,
+            )
+            state.liq_species_moles = {}
+
+        state.temperature = content.initial_temperature
+        if content.initial_pressure > 0.0:
+            state.pressure = content.initial_pressure
+
+
+def _clamp_syringe_inventory_capacity(
+    source_map: SourceMap,
+    states: dict[str, InventoryState],
+) -> None:
+    seen: set[str] = set()
+    for entry in source_map.values():
+        if not isinstance(entry.comp, SyringePumpData):
+            continue
+        if entry.comp.name in seen:
+            continue
+        seen.add(entry.comp.name)
+
+        state = states.get(entry.inv_node_id)
+        if state is None:
+            continue
+        capacity = entry.comp.syringe_volume.to_base_units().magnitude
+        total = state.liq_volume + state.gas_volume
+        if total <= capacity:
+            continue
+        logger.warning(
+            "worker: SyringePump '{}' exceeded fill capacity; "
+            "inventory volume {:.3e} m^3 clamped to {:.3e} m^3.",
+            entry.comp.name,
+            total,
+            capacity,
+        )
+        factor = capacity / total if total > 0.0 else 0.0
+        _scale_phase(state, factor)
+
+
+def _build_variable_volume_inventory_ids(source_map: SourceMap) -> set[str]:
+    """Inventory ids whose runtime volume can change, currently syringes."""
+    return {
+        entry.inv_node_id
+        for entry in source_map.values()
+        if isinstance(entry.comp, SyringePumpData)
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -249,11 +374,14 @@ class Worker:
         self._inv_states: dict[str, InventoryState] = build_inventory_states(graph)
         self._port_map: PortAccessMap = build_port_map(graph, components)
         self._source_map: SourceMap = build_source_map(graph, components)
-        self._syringe_actual: dict[str, float] = {
-            entry.comp.name: entry.comp.syringe_actual_volume.to_base_units().magnitude
-            for entry in self._source_map.values()
-            if isinstance(entry.comp, SyringePumpData)
-        }
+        self._variable_volume_inventory_ids = _build_variable_volume_inventory_ids(
+            self._source_map
+        )
+        _initialise_syringe_inventory_states(
+            self._graph,
+            self._source_map,
+            self._inv_states,
+        )
         self._bpr_entries: list[_BprEntry] = _build_bpr_entries(graph, components)
         self._mfc_entries: list[_MfcEntry] = _build_mfc_entries(graph, components)
         self._pump_entries: list[_PumpEntry] = _build_pump_entries(graph, components)
@@ -354,7 +482,13 @@ class Worker:
         result = advance(self._graph, hyd_state, self._transport_state, self._config.dt)
 
         # 5. Assimilate arriving pockets into inventories
-        assimilate(self._inv_states, result.arrivals, hyd_state)
+        assimilate(
+            self._inv_states,
+            result.arrivals,
+            hyd_state,
+            self._variable_volume_inventory_ids,
+        )
+        _clamp_syringe_inventory_capacity(self._source_map, self._inv_states)
 
         # 6. Apply reactions
         apply(self._inv_states, self._reactions_map, self._config.dt)
@@ -365,31 +499,21 @@ class Worker:
         )
 
         # 7. Emit replacement pockets from inventories
-        emitted = emit(self._inv_states, result.departures, self._port_map)
+        emitted = emit(
+            self._inv_states,
+            result.departures,
+            self._port_map,
+            self._variable_volume_inventory_ids,
+        )
 
         # 7.5. Emit from FlowSource boundary components (infinite or finite syringe)
         source_emitted = emit_from_sources(
             self._source_map,
             self._graph,
             hyd_state,
-            self._syringe_actual,
+            self._inv_states,
             self._config.dt,
         )
-
-        # Track syringe withdraw (Q < 0 means fluid drawn back into syringe)
-        for edge_id, entry in self._source_map.items():
-            if not isinstance(entry.comp, SyringePumpData):
-                continue
-            q = hyd_state.flows.get(edge_id, 0.0)
-            if q < 0:
-                dV = abs(q) * self._config.dt
-                self._syringe_actual[entry.comp.name] += dV
-                cap = entry.comp.syringe_volume.to_base_units().magnitude
-                if self._syringe_actual[entry.comp.name] > cap:
-                    logger.warning(
-                        "worker: SyringePump '{}' exceeded fill capacity",
-                        entry.comp.name,
-                    )
 
         # 8. Inject emitted pockets into transport queues
         self._transport_state = inject(

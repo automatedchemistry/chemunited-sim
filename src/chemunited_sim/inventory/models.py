@@ -14,10 +14,10 @@ from dataclasses import dataclass, field
 class InventoryState:
     """Mutable runtime state for one vessel inventory node.
 
-    A vessel is always full: ``liq_volume + gas_volume == capacity`` is the
-    invariant maintained by the hydraulic solver's flow-conservation
-    guarantee.  The inventory module does not enforce this per-step; it relies
-    on the solver.
+    Normal vessels are always full: ``liq_volume + gas_volume == capacity`` is
+    enforced during inventory emission/assimilation by exchanging gas
+    headspace. SyringePump inventories are the runtime exception and may
+    change total volume while infusing or withdrawing.
 
     All quantities are in SI units.
 
@@ -27,8 +27,9 @@ class InventoryState:
         Inventory node identifier, e.g. ``"vessel1.Inventory"``.
     capacity:
         Fixed geometric volume of the vessel in m³.  Set at construction
-        from ``InventoryNode.liq_content.volume + gas_content.volume``; never
-        changed at runtime.
+        from ``InventoryNode.liq_content.volume + gas_content.volume``. Normal
+        vessels keep this value fixed; SyringePump states are reset from the
+        syringe capacity at worker construction.
     pressure:
         Current vessel pressure in Pa.  Written from ``HydraulicState``
         at the start of each ``assimilate`` call before volumes change.

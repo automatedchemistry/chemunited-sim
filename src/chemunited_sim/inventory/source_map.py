@@ -3,7 +3,9 @@
 ``build_source_map`` creates a static lookup table (built once at simulation
 startup) that identifies every TRANSPORT edge whose inflow end originates
 from a FlowSource boundary node.  Used by ``emit_from_sources`` to create
-species-carrying pockets each tick without depleting any inventory.
+species-carrying pockets each tick.  Infinite sources use their declared
+template concentration; finite SyringePump sources deplete their runtime
+inventory state.
 """
 
 from __future__ import annotations

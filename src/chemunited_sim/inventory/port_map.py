@@ -2,8 +2,8 @@
 
 ``build_port_map`` creates a static lookup table (built once at simulation
 startup) that resolves, for every transport edge whose inflow end borders a
-vessel, which inventory node it drains from and whether that port is TOP
-(gas side) or BOTTOM (liquid side).
+vessel, which inventory node it drains from and whether that port prefers TOP
+(gas side) or BOTTOM (liquid side) emission.
 
 Valve switches change ``HydraulicEdge.resistance_override`` in-place and do
 not rebuild the graph, so this map remains valid for the entire simulation run.
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from chemunited_core.components import ComponentData
+from chemunited_core.components import ComponentData, FlowSourceData
 from chemunited_core.components.enums import InternalEdgeRole, PortAccess
 
 from ..adapter.models import HydraulicGraph
@@ -29,8 +29,8 @@ class EdgePortAccess:
         The inventory node this edge draws from,
         e.g. ``"vessel1.Inventory"``.
     access:
-        ``PortAccess.TOP`` → gas phase emitted.
-        ``PortAccess.BOTTOM`` → liquid phase emitted.
+        ``PortAccess.TOP`` → gas phase preferred.
+        ``PortAccess.BOTTOM`` → liquid phase preferred.
     """
 
     inv_node_id: str
@@ -71,6 +71,7 @@ def build_port_map(
         end neighbours a vessel inventory node.
     """
     comp_by_name: dict[str, ComponentData] = {c.name: c for c in components}
+    source_names = {c.name for c in components if isinstance(c, FlowSourceData)}
 
     # Step 1: port_node_id → inv_node_id from JUNCTION edges
     port_to_inv: dict[str, str] = {}
@@ -108,6 +109,9 @@ def build_port_map(
             continue
         for node_id in (edge.origin_node_id, edge.destination_node_id):
             if node_id not in port_to_inv:
+                continue
+            comp_name = node_id.rsplit(".", 1)[0]
+            if comp_name in source_names:
                 continue
             inv_node_id = port_to_inv[node_id]
             access = _get_access(node_id)
