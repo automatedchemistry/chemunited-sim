@@ -154,10 +154,10 @@ def resolve_historical_file(project_dir: Path, filename: str | None) -> Path:
     """Return the Path for a historical_file argument.
 
     If filename is None, returns the most recently modified JSON in
-    protocols_hystoric/. If filename is a basename, resolves it relative to
-    protocols_hystoric/. If it is an absolute path, uses it directly.
+    protocols_historic/. If filename is a basename, resolves it relative to
+    protocols_historic/. If it is an absolute path, uses it directly.
     """
-    historic_dir = project_dir / "protocols_hystoric"
+    historic_dir = project_dir / "protocols_historic"
 
     if filename is None:
         candidates = sorted(

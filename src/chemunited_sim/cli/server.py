@@ -346,10 +346,10 @@ class StartSimRequest(BaseModel):
     historical_file: str | None = Field(
         default=None,
         description=(
-            "Mode 1 only. Filename resolved inside `protocols_hystoric/`, or "
+            "Mode 1 only. Filename resolved inside `protocols_historic/`, or "
             "an absolute path to the JSON that defines the process sequence. "
             "If null, the most recently modified JSON in "
-            "`protocols_hystoric/` is used."
+            "`protocols_historic/` is used."
         ),
     )
 
