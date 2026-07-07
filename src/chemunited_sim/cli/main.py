@@ -14,7 +14,7 @@ from .clock import SimClock
 from .server import SimStatus, SimulationState, _do_load_project, app
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chemunited-sim",
         description="Start the chemunited simulation server.",
@@ -40,6 +40,17 @@ def main() -> None:
         metavar="PATH",
         help="Directory where .db files are saved (default: ./simulations/).",
     )
+    parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="Run with a system tray icon; use its Quit item to stop the "
+        "server (default: blocking terminal mode, Ctrl+C to stop).",
+    )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     db_dir = args.db.resolve()
@@ -61,7 +72,15 @@ def main() -> None:
     if args.project is not None:
         _do_load_project(args.project.resolve(), state)
 
-    uvicorn.run(app, host="127.0.0.1", port=args.port)
+    if args.tray:
+        from .tray import run_with_tray
+
+        try:
+            run_with_tray(app, host="127.0.0.1", port=args.port, state=state)
+        except RuntimeError as exc:
+            parser.error(str(exc))
+    else:
+        uvicorn.run(app, host="127.0.0.1", port=args.port)
 
 
 if __name__ == "__main__":

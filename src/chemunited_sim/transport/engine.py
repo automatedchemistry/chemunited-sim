@@ -415,7 +415,7 @@ def _pocket_thermal_mass(pocket: Pocket) -> float:
         key = (species_id, phase)
         cp = _CP_CACHE.get(key)
         if cp is None:
-            cp = COMPOUNDS[species_id].cp(phase_name)
+            cp = COMPOUNDS[species_id].cp(phase_name).to_base_units().magnitude
             _CP_CACHE[key] = cp
         total += moles * cp
     return total

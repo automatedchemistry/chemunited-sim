@@ -196,7 +196,10 @@ def test_transport_heat_exchange_applies_stable_plug_flow_ua_model() -> None:
 
     apply_transport_heat_exchange(state, [entry], dt=0.5)
 
-    c_thermal = pocket.species_moles["air"] * COMPOUNDS["air"].cp("gas")
+    c_thermal = (
+        pocket.species_moles["air"]
+        * COMPOUNDS["air"].cp("gas").to_base_units().magnitude
+    )
     area = (4.0 / entry.diameter) * pocket.volume
     expected = entry.T_wall + (pocket.temperature - entry.T_wall) * math.exp(
         -(entry.U * area / c_thermal) * 0.5

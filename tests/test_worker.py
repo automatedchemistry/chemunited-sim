@@ -27,7 +27,7 @@ from chemunited_core.components import (
 )
 from chemunited_core.connections import EdgeData, EdgeMode
 from chemunited_core.figure_registry import COMPONENTS
-from chemunited_core.utils.internal_quantity import ChemUnitQuantity
+from chemunited_quantities import ChemUnitQuantity
 
 from chemunited_sim.adapter import compile_graph
 from chemunited_sim.recorder import Recorder

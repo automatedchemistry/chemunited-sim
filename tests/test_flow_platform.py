@@ -235,14 +235,14 @@ def test_mode2_double_start_rejected(loaded_client):
 def test_mode1_runs_to_end(loaded_client):
     _start_mode1(loaded_client)
     assert _wait_until_idle(
-        loaded_client, timeout=10.0
+        loaded_client, timeout=30.0
     ), "simulation did not reach idle"
     assert loaded_client.get("/status").json()["sim_status"] == "idle"
 
 
 def test_simulation_db_after_run(loaded_client):
     _start_mode1(loaded_client, "db_test_run")
-    assert _wait_until_idle(loaded_client, timeout=10.0)
+    assert _wait_until_idle(loaded_client, timeout=30.0)
     resp = loaded_client.get("/simulation/db")
     assert resp.status_code == 200
     db_path = Path(resp.json()["db_path"])

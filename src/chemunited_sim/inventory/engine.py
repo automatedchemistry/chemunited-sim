@@ -45,7 +45,7 @@ def _thermal_mass(species_moles: dict[str, float], phase_kind: PhaseKind) -> flo
     """Sum of n_i * Cp_i (J/K) for all tracked species."""
     phase_str = "liquid" if phase_kind == PhaseKind.LIQUID else "gas"
     return sum(
-        moles * COMPOUNDS[s].cp(phase_str)
+        moles * COMPOUNDS[s].cp(phase_str).to_base_units().magnitude
         for s, moles in species_moles.items()
         if s in COMPOUNDS
     )

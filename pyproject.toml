@@ -32,6 +32,10 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.15.7",
 ]
+tray = [
+    "pystray>=0.19",
+    "pillow>=10",
+]
 
 [tool.hatch.metadata]
 allow-direct-references = true
