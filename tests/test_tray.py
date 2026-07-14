@@ -21,7 +21,9 @@ from chemunited_sim.cli.tray import _display_host, _stop_running_simulation
 from chemunited_sim.worker.config import SimConfig
 
 
-def _make_state(sim_status: SimStatus, worker_thread: threading.Thread | None) -> SimulationState:
+def _make_state(
+    sim_status: SimStatus, worker_thread: threading.Thread | None
+) -> SimulationState:
     return SimulationState(
         sim_status=sim_status,
         current_t=0.0,

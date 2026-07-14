@@ -36,7 +36,7 @@ from .loader import (
     parse_historical_file,
     resolve_historical_file,
 )
-from .sim_client import SimClient, SimCommand
+from .sim_client import SimClient, SimCommand, write_pool_log
 
 # ---------------------------------------------------------------------------
 # State types
@@ -157,10 +157,11 @@ def _worker_thread_fn(
                 except queue.Empty:
                     break
                 logger.debug(
-                    "Applying command | component={} command={} kwargs={}",
+                    "Applying command | component={} command={} kwargs={} t={:.3f}",
                     cmd.component,
                     cmd.command,
                     cmd.kwargs,
+                    clock.now(),
                 )
                 if cmd.pre_applied:
                     resync_component(graph, components[cmd.component])
@@ -358,6 +359,10 @@ class CommandRequest(BaseModel):
     component: str
     command: str
     kwargs: dict = {}
+    wait_time: float = 0.0
+    wait_feedback_status: bool = False
+    feedback_status_command: str = ""
+    feedback_answer: str = "true"
 
 
 # -- Endpoints --------------------------------------------------------------
@@ -490,6 +495,11 @@ def post_simulation_start(req: StartSimRequest) -> dict:
     state._workflow_done.clear()
     state.current_t = 0.0
 
+    pool_dir = project.project_path / "log" / "pool"
+    if pool_dir.exists():
+        for f in pool_dir.glob("*.jsonl"):
+            f.unlink(missing_ok=True)
+
     state._worker_thread = Thread(
         target=_worker_thread_fn,
         args=(
@@ -517,7 +527,9 @@ def post_simulation_start(req: StartSimRequest) -> dict:
 
         sim_platform = Platform(
             {  # type: ignore[arg-type]
-                name: SimClient(name, comp, state.clock, state.cmd_queue)
+                name: SimClient(
+                    name, comp, state.clock, state.cmd_queue, project.project_path
+                )
                 for name, comp in project.components.items()
             }
         )
@@ -598,11 +610,23 @@ def post_simulation_command(req: CommandRequest) -> dict:
     state = get_state()
     if state.sim_status != SimStatus.RUNNING:
         raise HTTPException(409, "No simulation currently running.")
+    assert state.project is not None
     logger.debug(
         "Command enqueued | component={} command={} kwargs={}",
         req.component,
         req.command,
         req.kwargs,
+    )
+    write_pool_log(
+        state.project.project_path,
+        req.component,
+        method="PUT",
+        command=req.command,
+        params=req.kwargs or None,
+        wait_time=state.clock.now(),
+        wait_feedback_status=req.wait_feedback_status,
+        feedback_status_command=req.feedback_status_command,
+        feedback_answer=req.feedback_answer,
     )
     state.cmd_queue.put(
         SimCommand(component=req.component, command=req.command, kwargs=req.kwargs)

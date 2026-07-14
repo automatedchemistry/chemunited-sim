@@ -218,3 +218,4 @@ simulations/
 # pre-commit
 .pre-commit-cache*
 .tmp*
+tests/flow_platform/log/

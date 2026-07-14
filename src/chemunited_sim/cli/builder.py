@@ -85,6 +85,7 @@ class PlatformBuilder:
         cp_liquid: float = 150.0,
         density_liquid: float = 1050.0,
         cp_gas: float = 29.0,
+        **kwargs,
     ):
         if name in COMPOUNDS:
             raise ValueError(f"Compound '{name}' already exists")
@@ -95,6 +96,7 @@ class PlatformBuilder:
                 cp_liquid=cp_liquid,
                 cp_gas=cp_gas,
                 density_liquid=density_liquid,
+                **kwargs,
             )
         )
         logger.debug("Compound registered | name='{}' MW={}", name, molecular_weight)
@@ -131,6 +133,26 @@ class PlatformBuilder:
             reactant,
             product,
         )
+
+    def fill_iventory(self, component: str, iventory: str, phase: str, content: dict):
+        if component not in self._components:
+            return
+        node = self._components[component].internal_inventories.get(iventory)
+        if node is None:
+            return
+        phase_content = node.liq_content if phase == "liq" else node.gas_content
+        if "volume" in content:
+            phase_content.volume = float(content["volume"])
+        if "initial_species" in content:
+            phase_content.initial_species = {
+                str(k): float(v)
+                for k, v in content["initial_species"].items()
+                if float(v) > 0.0
+            }
+        if "initial_pressure" in content:
+            phase_content.initial_pressure = float(content["initial_pressure"])
+        if "initial_temperature" in content:
+            phase_content.initial_temperature = float(content["initial_temperature"])
 
     @property
     def reactions_map(self) -> ReactionsMap:

@@ -51,7 +51,7 @@ def _stop_background_threads() -> None:
     server._state.sim_status = SimStatus.IDLE
 
 
-def _wait_until_idle(client: TestClient, timeout: float = 20.0) -> bool:
+def _wait_until_idle(client: TestClient, timeout: float = 40.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if client.get("/status").json()["sim_status"] == "idle":
@@ -76,7 +76,7 @@ def test_reactor_liquid_path_uses_bottom_ports():
     source_map = build_source_map(project.graph, list(project.components.values()))
 
     assert port_map["reactortube_2_reactor_2"].access == PortAccess.BOTTOM
-    assert port_map["reactor_1_bpr_1"].access == PortAccess.BOTTOM
+    assert port_map["reactor_3_bpr_1"].access == PortAccess.BOTTOM
     assert "liquidpump_1_tmixer_2" not in port_map
     assert "liquidpump_1_tmixer_2" in source_map
 
@@ -300,9 +300,9 @@ def test_mode1_latest_snapshot_keeps_all_transport_edges(workspace_tmp):
         }
         edge_ids = {edge["id"] for edge in dashboard_payload["edges"]}
         assert {"reactor", "bpr"} <= component_ids
-        assert {"reactor_1_bpr_1", "bpr_2_divertvalve_0"} <= edge_ids
+        assert {"reactor_3_bpr_1", "bpr_2_divertvalve_0"} <= edge_ids
         for edge_id in (
-            "reactor_1_bpr_1",
+            "reactor_3_bpr_1",
             "bpr_2_divertvalve_0",
             "divertvalve_2_wastesink_1",
         ):

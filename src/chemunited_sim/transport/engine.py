@@ -421,9 +421,7 @@ def _pocket_thermal_mass(pocket: Pocket) -> float:
     return total
 
 
-def _heat_pocket(
-    pocket: Pocket, T_wall: float, rate_factor: float
-) -> Pocket:
+def _heat_pocket(pocket: Pocket, T_wall: float, rate_factor: float) -> Pocket:
     if abs(pocket.temperature - T_wall) <= 1.0e-12:
         return pocket
 
