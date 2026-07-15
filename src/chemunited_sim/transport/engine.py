@@ -332,8 +332,11 @@ def _process_hub(
 
     1. Merge all staged pockets by phase (via
        :func:`~chemunited_sim.transport.junction.merge_arriving_pockets`).
-    2. Find outgoing TRANSPORT edges reachable from this hub via a JUNCTION
-       edge to a port, where the TRANSPORT edge carries flow away from the
+    2. Find outgoing TRANSPORT edges, which can be attached either directly
+       to the hub itself (e.g. a rotary distribution valve's common port,
+       which is simultaneously the hub node and an external tubing
+       attachment point) or reachable from this hub via a JUNCTION edge to a
+       neighboring port, where the TRANSPORT edge carries flow away from the
        port.
     3. Distribute each merged pocket across outgoing edges proportionally to
        their displaced volume ``|Q|·dt``.
@@ -343,8 +346,12 @@ def _process_hub(
     if not merged:
         return
 
-    # Outgoing transport edges keyed by edge_id → dV
-    outgoing_dv: dict[str, float] = {}
+    # Outgoing transport edges keyed by edge_id → dV. Seed with any TRANSPORT
+    # edge attached directly to the hub node itself (e.g. a distribution
+    # valve's common port), then add edges reachable one JUNCTION hop away.
+    outgoing_dv: dict[str, float] = dict(
+        _outgoing_transport_dv(hub_id, hyd_state, dt, transport_by_node)
+    )
 
     for port_id, junc_edge in junction_neighbors.get(hub_id, []):
         Q_junc = hyd_state.flows.get(junc_edge.edge_id, 0.0)
@@ -363,7 +370,9 @@ def _process_hub(
                 and Q_trans < -MIN_POCKET_VOLUME
             )
             if away_from_port:
-                outgoing_dv[trans_id] = abs(Q_trans) * dt
+                outgoing_dv[trans_id] = (
+                    outgoing_dv.get(trans_id, 0.0) + abs(Q_trans) * dt
+                )
                 break
 
     if not outgoing_dv:

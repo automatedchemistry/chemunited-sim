@@ -121,7 +121,11 @@ direction of flow, up to a hop limit — until it reaches:
 - a dead-end boundary port (absorbed and discarded).
 
 Pass 2 merges hub-staged pockets by phase (ideal mixing) and redistributes
-them to outgoing transport edges proportionally to displaced volume.
+them to outgoing transport edges proportionally to displaced volume. An
+outgoing transport edge may be attached directly to the hub node itself
+(e.g. a rotary distribution valve's common port, which is simultaneously
+the hub and an external tubing attachment point) as well as reachable one
+JUNCTION hop away at a neighboring port — both shapes are searched.
 
 Edges closed by a large resistance override, or with zero flow, carry their
 queues forward unchanged. Pockets below `MIN_POCKET_VOLUME` are discarded at

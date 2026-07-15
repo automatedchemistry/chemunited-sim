@@ -142,6 +142,84 @@ def test_reverse_non_hub_pass_through_injects_at_destination_end() -> None:
     assert list(result.next_state.edge_queues["downstream"]) == []
 
 
+def _valve_common_port_graph() -> HydraulicGraph:
+    """Mirror a rotary distribution valve's common port: `hub` is both the
+    hub node and the direct attachment point of a TRANSPORT edge (like
+    SixPortDistributionValve.0 -> SyringePump), reached from `src` via a
+    peripheral port and a JUNCTION channel (like GlassBottle -> port 1)."""
+    graph = HydraulicGraph()
+    for node_id in ("src", "port1", "hub", "dst"):
+        graph.nodes[node_id] = _node(node_id, is_hub=(node_id == "hub"))
+    graph.edges["upstream"] = _edge("upstream", "src", "port1")
+    graph.edges["port1.hub"] = _edge(
+        "port1.hub", "port1", "hub", role=InternalEdgeRole.JUNCTION
+    )
+    graph.edges["downstream"] = _edge("downstream", "hub", "dst")
+    return graph
+
+
+def test_hub_with_directly_attached_transport_edge_routes_pocket_forward() -> None:
+    """Regression test: a pocket flowing INTO a hub via a JUNCTION edge must
+    still find an outgoing TRANSPORT edge attached directly to that hub node
+    (not just edges one further JUNCTION hop away) - this is the withdraw-
+    through-a-valve's-common-port shape that was silently discarding mass."""
+    graph = _valve_common_port_graph()
+    pocket = _hot_pocket()
+    state = TransportState(
+        edge_queues={
+            "upstream": deque([pocket]),
+            "downstream": deque(),
+        }
+    )
+    hyd_state = HydraulicState(
+        pressures={},
+        flows={
+            "upstream": 1.0e-5,
+            "port1.hub": 1.0e-5,
+            "downstream": 1.0e-5,
+        },
+    )
+
+    result = advance(graph, hyd_state, state, dt=0.1)
+
+    assert result.arrivals == {}
+    assert list(result.next_state.edge_queues["upstream"]) == []
+    routed = list(result.next_state.edge_queues["downstream"])
+    assert len(routed) == 1
+    assert routed[0].volume == pytest.approx(pocket.volume)
+    assert routed[0].species_moles == pytest.approx(pocket.species_moles)
+
+
+def test_hub_with_directly_attached_transport_edge_routes_pocket_reverse() -> None:
+    """The already-working direction (pocket originates on the hub-attached
+    edge, exits through a neighboring port) must keep working after the fix."""
+    graph = _valve_common_port_graph()
+    pocket = _hot_pocket()
+    state = TransportState(
+        edge_queues={
+            "upstream": deque(),
+            "downstream": deque([pocket]),
+        }
+    )
+    hyd_state = HydraulicState(
+        pressures={},
+        flows={
+            "upstream": -1.0e-5,
+            "port1.hub": -1.0e-5,
+            "downstream": -1.0e-5,
+        },
+    )
+
+    result = advance(graph, hyd_state, state, dt=0.1)
+
+    assert result.arrivals == {}
+    assert list(result.next_state.edge_queues["downstream"]) == []
+    routed = list(result.next_state.edge_queues["upstream"])
+    assert len(routed) == 1
+    assert routed[0].volume == pytest.approx(pocket.volume)
+    assert routed[0].species_moles == pytest.approx(pocket.species_moles)
+
+
 def test_dead_end_without_outgoing_transport_still_discards_pocket() -> None:
     graph = HydraulicGraph()
     graph.nodes["src"] = _node("src")
