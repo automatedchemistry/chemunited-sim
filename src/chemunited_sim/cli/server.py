@@ -36,7 +36,7 @@ from .loader import (
     parse_historical_file,
     resolve_historical_file,
 )
-from .sim_client import SimClient, SimCommand, write_pool_log
+from .sim_client import SimClient, SimCommand, iter_apply_kwargs, write_pool_log
 
 # ---------------------------------------------------------------------------
 # State types
@@ -126,6 +126,7 @@ def _worker_thread_fn(
         dt=config.dt,
         record_interval=2.0,
         platform_name=project.project_path.stem,
+        components=project.components,
     )
     worker = Worker(
         graph=project.graph,
@@ -166,16 +167,19 @@ def _worker_thread_fn(
                 if cmd.pre_applied:
                     resync_component(graph, components[cmd.component])
                 else:
-                    result = components[cmd.component].apply(cmd.command, **cmd.kwargs)
-                    resync_component(graph, components[cmd.component])
-                    for s in result.scheduled:
-                        heapq.heappush(
-                            scheduled,
-                            (
-                                clock.now() + s.dt,
-                                SimCommand(cmd.component, s.command, s.kwargs),
-                            ),
+                    for call_kwargs in iter_apply_kwargs(cmd.command, cmd.kwargs):
+                        result = components[cmd.component].apply(
+                            cmd.command, **call_kwargs
                         )
+                        for s in result.scheduled:
+                            heapq.heappush(
+                                scheduled,
+                                (
+                                    clock.now() + s.dt,
+                                    SimCommand(cmd.component, s.command, s.kwargs),
+                                ),
+                            )
+                    resync_component(graph, components[cmd.component])
 
             # 2. Fire scheduled events that are now due
             while scheduled and scheduled[0][0] <= clock.now():

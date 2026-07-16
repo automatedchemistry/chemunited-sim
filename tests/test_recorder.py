@@ -11,13 +11,17 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from collections import deque
 
 import pytest
 from chemunited_core.common.enums import PhaseKind
+from chemunited_core.components import ComponentData
 from chemunited_core.components.enums import InternalEdgeRole
+from chemunited_core.figure_registry import SolenoidValve2WayData, SolenoidValveData
+from chemunited_core.figure_registry.rotary_valve import RotaryValveData
 from loguru import logger
 
 from chemunited_sim.adapter.models import HydraulicEdge, HydraulicGraph, HydraulicNode
@@ -594,7 +598,110 @@ class TestRecord:
 
 
 # ---------------------------------------------------------------------------
-# 6. Recorder.close — idempotent
+# 6. Recorder.record — component_state (discrete state)
+# ---------------------------------------------------------------------------
+
+
+class TestComponentState:
+    def _setup(self, tmp_path, components, db_name="cs.db"):
+        graph = _simple_graph()
+        rec = Recorder(
+            db_path=tmp_path / db_name,
+            graph=graph,
+            dt=0.1,
+            record_interval=1.0,
+            components=components,
+        )
+        return rec, tmp_path / db_name
+
+    def _open_ro(self, db_path):
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def test_rotary_valve_rotor_ports_recorded(self, tmp_path):
+        valve = RotaryValveData(name="Valve1")
+        valve.rotor_ports = [(0, 1, None, None, None, None), (0,)]
+        rec, db_path = self._setup(tmp_path, {"Valve1": valve})
+
+        rec.record(0.0, _make_hyd_state(), TransportState(edge_queues={}), {})
+        rec.close()
+
+        conn = self._open_ro(db_path)
+        rows = list(
+            conn.execute("SELECT * FROM component_state WHERE component='Valve1'")
+        )
+        conn.close()
+
+        assert len(rows) == 1
+        state = json.loads(rows[0]["state"])
+        assert state == {"rotor_ports": [[0, 1, None, None, None, None], [0]]}
+
+    def test_solenoid_valve_opened_recorded(self, tmp_path):
+        solenoid = SolenoidValveData(name="Sol1")
+        solenoid.opened = False
+        rec, db_path = self._setup(tmp_path, {"Sol1": solenoid})
+
+        rec.record(0.0, _make_hyd_state(), TransportState(edge_queues={}), {})
+        rec.close()
+
+        conn = self._open_ro(db_path)
+        rows = list(
+            conn.execute("SELECT * FROM component_state WHERE component='Sol1'")
+        )
+        conn.close()
+
+        assert len(rows) == 1
+        assert json.loads(rows[0]["state"]) == {"opened": False}
+
+    def test_solenoid_2way_opened_recorded(self, tmp_path):
+        solenoid = SolenoidValve2WayData(name="Sol2")
+        rec, db_path = self._setup(tmp_path, {"Sol2": solenoid})
+
+        rec.record(0.0, _make_hyd_state(), TransportState(edge_queues={}), {})
+        rec.close()
+
+        conn = self._open_ro(db_path)
+        rows = list(
+            conn.execute("SELECT * FROM component_state WHERE component='Sol2'")
+        )
+        conn.close()
+
+        assert len(rows) == 1
+        assert json.loads(rows[0]["state"]) == {"opened": True}
+
+    def test_component_without_discrete_state_not_recorded(self, tmp_path):
+        plain = ComponentData(name="Plain1")
+        rec, db_path = self._setup(tmp_path, {"Plain1": plain})
+
+        rec.record(0.0, _make_hyd_state(), TransportState(edge_queues={}), {})
+        rec.close()
+
+        conn = self._open_ro(db_path)
+        count = conn.execute("SELECT COUNT(*) FROM component_state").fetchone()[0]
+        conn.close()
+        assert count == 0
+
+    def test_omitting_components_param_writes_no_rows(self, tmp_path):
+        graph = _simple_graph()
+        rec = Recorder(
+            db_path=tmp_path / "no_components.db",
+            graph=graph,
+            dt=0.1,
+            record_interval=1.0,
+        )
+
+        rec.record(0.0, _make_hyd_state(), _make_transport_state(graph), {})
+        rec.close()
+
+        conn = self._open_ro(tmp_path / "no_components.db")
+        count = conn.execute("SELECT COUNT(*) FROM component_state").fetchone()[0]
+        conn.close()
+        assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# 7. Recorder.close — idempotent
 # ---------------------------------------------------------------------------
 
 

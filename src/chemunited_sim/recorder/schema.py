@@ -108,6 +108,17 @@ SQL_IDX_CELL_CONTENT = (
     "CREATE INDEX IF NOT EXISTS idx_cell_content_time ON cell_content (time);"
 )
 
+SQL_CREATE_COMPONENT_STATE = """
+CREATE TABLE IF NOT EXISTS component_state (
+    time      REAL NOT NULL,
+    component TEXT NOT NULL,
+    state     TEXT NOT NULL
+);
+"""
+SQL_IDX_COMPONENT_STATE = (
+    "CREATE INDEX IF NOT EXISTS idx_component_state_time ON component_state (time);"
+)
+
 # ---------------------------------------------------------------------------
 # INSERT statements (used by Recorder.record via executemany)
 # ---------------------------------------------------------------------------
@@ -144,6 +155,9 @@ SQL_INSERT_CELL_CONTENT = (
     "(time, edge_id, cell_index, phase, species_id, moles) "
     "VALUES (?, ?, ?, ?, ?, ?);"
 )
+SQL_INSERT_COMPONENT_STATE = (
+    "INSERT INTO component_state (time, component, state) VALUES (?, ?, ?);"
+)
 
 # All DDL statements in creation order
 _ALL_DDL = [
@@ -161,6 +175,8 @@ _ALL_DDL = [
     SQL_IDX_CELL_STATE,
     SQL_CREATE_CELL_CONTENT,
     SQL_IDX_CELL_CONTENT,
+    SQL_CREATE_COMPONENT_STATE,
+    SQL_IDX_COMPONENT_STATE,
 ]
 
 

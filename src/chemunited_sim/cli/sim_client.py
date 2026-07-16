@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from chemunited_core.components import ComponentData
 
@@ -21,6 +21,43 @@ class SimCommand:
     command: str
     kwargs: dict = field(default_factory=dict)
     pre_applied: bool = False
+
+
+def _normalize_connect_pairs(parsed: object) -> list[tuple[int, int]] | None:
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    # Flat pair: [a, b] - both elements are numbers, not nested lists.
+    if len(parsed) == 2 and all(isinstance(x, (int, float)) for x in parsed):
+        return [tuple(parsed)]  # type: ignore[list-item]
+    # One or more pairs: [[a, b], ...] - every element is itself a 2-element list.
+    if all(isinstance(item, list) and len(item) == 2 for item in parsed):
+        return [tuple(item) for item in parsed]
+    return None
+
+
+def iter_apply_kwargs(command: str, kwargs: dict) -> Iterator[dict]:
+    """Normalize a "position" command's ``connect`` kwarg before calling apply().
+
+    ``PositionParameter.connect`` (chemunited_core.protocols.valves) is
+    deliberately str-typed for a GUI dropdown, and its JSON shape isn't
+    consistent - a flat pair "[a, b]" or a wrapped list of pairs
+    "[[a, b]]"/"[[a, b], [c, d]]". ``ComponentData.apply()`` expects a single
+    flat pair, so detect the shape, unwrap, and iterate - one ``apply()`` call
+    per pair. Mirrors chemunited-orchestrator's pool_commands.py, which does
+    the same unwrapping for its live GUI-replay path; this is the equivalent
+    for the actual physics application here.
+    """
+    if command == "position" and isinstance(kwargs.get("connect"), str):
+        try:
+            parsed = json.loads(kwargs["connect"])
+        except (json.JSONDecodeError, ValueError, TypeError):
+            parsed = None
+        pairs = _normalize_connect_pairs(parsed)
+        if pairs:
+            for pair in pairs:
+                yield {**kwargs, "connect": pair}
+            return
+    yield kwargs
 
 
 def write_pool_log(
@@ -101,13 +138,16 @@ class SimClient:
             feedback_status_command=feedback_status_command,
             feedback_answer=feedback_answer,
         )
-        result = self._component.apply(command, **kwargs)
+        scheduled = []
+        for call_kwargs in iter_apply_kwargs(command, kwargs):
+            result = self._component.apply(command, **call_kwargs)
+            scheduled.extend(result.scheduled)
         self._queue.put(
             SimCommand(
                 component=self._name, command=command, kwargs=kwargs, pre_applied=True
             )
         )
-        for s in result.scheduled:
+        for s in scheduled:
             threading.Thread(
                 target=self._deferred_enqueue,
                 args=(s.dt, s.command, s.kwargs),

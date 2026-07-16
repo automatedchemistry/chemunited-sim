@@ -9,6 +9,7 @@ Do NOT write to SQLite from any other module.  See CLAUDE.md.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import sqlite3
@@ -16,6 +17,9 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from chemunited_core.common.enums import PhaseKind
+from chemunited_core.components import ComponentData
+from chemunited_core.figure_registry import SolenoidValve2WayData, SolenoidValveData
+from chemunited_core.figure_registry.rotary_valve import RotaryValveData
 from loguru import logger
 
 from ..adapter.models import HydraulicGraph
@@ -28,6 +32,7 @@ from .models import CellDefinition
 from .schema import (
     SQL_INSERT_CELL_CONTENT,
     SQL_INSERT_CELL_STATE,
+    SQL_INSERT_COMPONENT_STATE,
     SQL_INSERT_EDGE_CELLS,
     SQL_INSERT_EDGE_FLOW,
     SQL_INSERT_INVENTORY_CONTENT,
@@ -54,7 +59,7 @@ class Recorder:
     """Writes simulation state to a SQLite database at fixed record intervals.
 
     Opens a single WAL-mode connection on construction and keeps it alive for
-    the entire simulation run.  All six dynamic tables are written atomically
+    the entire simulation run.  All dynamic tables are written atomically
     in a single transaction per record step via ``executemany``.
 
     **Thread safety**: the connection is single-threaded (``check_same_thread
@@ -82,6 +87,12 @@ class Recorder:
     cell_length_m:
         Nominal cell length for edge slicing.  Defaults to
         :data:`~chemunited_sim.common.constant.RECORDER_CELL_LENGTH_M`.
+    components:
+        Live component data, keyed by component name.  Used to capture
+        discrete component state (rotary valve rotor position, solenoid
+        valve open/closed) into the ``component_state`` table each record
+        step.  Optional — omit for graphs with no such components, or when
+        discrete-state recording isn't needed.
     """
 
     def __init__(
@@ -92,10 +103,12 @@ class Recorder:
         record_interval: float = RECORDER_INTERVAL_DEFAULT,
         platform_name: str = "",
         cell_length_m: float = RECORDER_CELL_LENGTH_M,
+        components: dict[str, ComponentData] | None = None,
     ) -> None:
         self._graph = graph
         self._dt = dt
         self._record_interval = record_interval
+        self._components: dict[str, ComponentData] = components or {}
 
         # Integer-tick interval — pre-computed to avoid per-step float division
         raw_ticks = record_interval / dt
@@ -175,7 +188,7 @@ class Recorder:
 
         If ``should_record(t)`` is ``False`` the call is a no-op.
 
-        All six tables are written in one atomic transaction.  On failure a
+        All tables are written in one atomic transaction.  On failure a
         :class:`RecorderWriteError` is raised; no partial snapshot is
         committed.
 
@@ -201,6 +214,7 @@ class Recorder:
         edge_flow_rows: list[tuple] = []
         cell_state_rows: list[tuple] = []
         cell_content_rows: list[tuple] = []
+        component_state_rows: list[tuple] = []
 
         # node_pressure
         for node_id, pressure in hyd_state.pressures.items():
@@ -309,6 +323,17 @@ class Recorder:
                             )
                         )
 
+        # component_state — discrete state not otherwise recoverable from the
+        # continuous tables above (rotor position, solenoid open/closed)
+        for name, component in self._components.items():
+            if isinstance(component, RotaryValveData):
+                state = {"rotor_ports": component.rotor_ports}
+            elif isinstance(component, (SolenoidValveData, SolenoidValve2WayData)):
+                state = {"opened": component.opened}
+            else:
+                continue
+            component_state_rows.append((t, name, json.dumps(state)))
+
         try:
             with self._conn:
                 self._conn.executemany(SQL_INSERT_NODE_PRESSURE, node_pressure_rows)
@@ -317,6 +342,7 @@ class Recorder:
                 self._conn.executemany(SQL_INSERT_EDGE_FLOW, edge_flow_rows)
                 self._conn.executemany(SQL_INSERT_CELL_STATE, cell_state_rows)
                 self._conn.executemany(SQL_INSERT_CELL_CONTENT, cell_content_rows)
+                self._conn.executemany(SQL_INSERT_COMPONENT_STATE, component_state_rows)
         except sqlite3.Error as exc:
             raise RecorderWriteError(
                 f"Recorder failed to write at t={t:.6f} s: {exc}"

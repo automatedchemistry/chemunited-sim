@@ -15,6 +15,7 @@ recorder = Recorder(
     dt=0.1,
     record_interval=1.0,
     platform_name="demo",
+    components=components,
 )
 
 worker = Worker(graph, components, config, recorder=recorder)
@@ -60,10 +61,20 @@ Dynamic tables are appended at every record interval.
 | `inventory_content` | Phase volume and species moles in vessel inventories |
 | `cell_state` | Phase fraction and temperature per transport cell |
 | `cell_content` | Species moles per transport cell |
+| `component_state` | Discrete component state not recoverable from the other tables |
 
 When a phase has no tracked species, `inventory_content` writes a sentinel
 species ID named `__carrier__` with zero moles so readers can still see the
 phase volume.
+
+`component_state` covers the small set of discrete (non-continuous) fields
+that `ComponentData.apply()` can mutate: a rotary valve's `rotor_ports` and a
+solenoid valve's `opened`. One row is written per relevant component per
+record interval, with `state` holding a JSON blob (`{"rotor_ports": [...]}`
+or `{"opened": true}`) rather than dedicated columns, since `rotor_ports` is
+a nested structure that doesn't flatten. Passing `components=` to `Recorder`
+is optional — omit it (or a graph with no valve/solenoid components) and no
+rows are written.
 
 ## Reader Guidance
 
