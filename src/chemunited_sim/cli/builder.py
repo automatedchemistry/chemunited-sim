@@ -7,9 +7,16 @@ from chemunited_core.components import ComponentData, NeutralComponentData
 from chemunited_core.compounds import COMPOUNDS, ChemicalEntity
 from chemunited_core.connections.edge import EdgeData, EdgeMode
 from chemunited_core.figure_registry import COMPONENTS
+from chemunited_quantities import ChemUnitQuantity
 from loguru import logger
 
 from ..reactions import FirstOrderDecay, ReactionsMap
+
+
+def _quantity(value: float | str | ChemUnitQuantity, unit: str) -> ChemUnitQuantity:
+    if isinstance(value, ChemUnitQuantity):
+        return value
+    return ChemUnitQuantity(value, unit)
 
 
 class PlatformBuilder:
@@ -58,10 +65,9 @@ class PlatformBuilder:
         length = kwargs.pop("length", "100 mm")
         diameter = kwargs.pop("diameter", "1 mm")
         classification = kwargs.pop("classification", ConnectionType.HYDRAULIC)
-        name = kwargs.pop("name", f"{origin}.{origin_port}-{destiny}.{destiny_port}")
+        kwargs.pop("name", None)
 
         mode = EdgeMode(
-            name=name,
             origin=origin,
             destination=destiny,
             origin_port=origin_port,
@@ -81,21 +87,21 @@ class PlatformBuilder:
     def add_compound(
         self,
         name: str = "reagent_a",
-        molecular_weight: float = 120.0,
-        cp_liquid: float = 150.0,
-        density_liquid: float = 1050.0,
-        cp_gas: float = 29.0,
+        molecular_weight: float | str | ChemUnitQuantity = 120.0,
+        cp_liquid: float | str | ChemUnitQuantity = 150.0,
+        density_liquid: float | str | ChemUnitQuantity = 1050.0,
+        cp_gas: float | str | ChemUnitQuantity = 29.0,
         **kwargs,
-    ):
+    ) -> None:
         if name in COMPOUNDS:
             raise ValueError(f"Compound '{name}' already exists")
         COMPOUNDS.register(
             ChemicalEntity(
                 name=name,
-                molecular_weight=molecular_weight,
-                cp_liquid=cp_liquid,
-                cp_gas=cp_gas,
-                density_liquid=density_liquid,
+                molecular_weight=_quantity(molecular_weight, "g/mol"),
+                cp_liquid=_quantity(cp_liquid, "J/(mol*K)"),
+                cp_gas=_quantity(cp_gas, "J/(mol*K)"),
+                density_liquid=_quantity(density_liquid, "kg/m^3"),
                 **kwargs,
             )
         )

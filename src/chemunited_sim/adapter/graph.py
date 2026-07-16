@@ -42,6 +42,8 @@ def resync_component(graph: HydraulicGraph, comp: ComponentData) -> None:
 def _port_category(
     comp: ComponentData, port_number: int | str
 ) -> ConnectionType | None:
+    if not isinstance(port_number, int):
+        return None
     port = comp.ports_by_number.get(port_number)
     return None if port is None else port.category
 

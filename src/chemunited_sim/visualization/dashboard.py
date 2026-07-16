@@ -278,7 +278,7 @@ def _read_cell_profiles(conn: sqlite3.Connection) -> dict[str, Any]:
         {"key": key, "value": value, "label": f"{_format_number(value)} s"}
         for key, value in sorted(times_by_key.items(), key=lambda item: item[1])
     ]
-    ordered_time_keys = [item["key"] for item in time_payload]
+    ordered_time_keys = [str(item["key"]) for item in time_payload]
     dynamic_edges = set(cell_indices) | set(edge_times)
     edges = []
 
@@ -305,12 +305,12 @@ def _read_cell_profiles(conn: sqlite3.Connection) -> dict[str, Any]:
             }
             for phase, species_id in sorted(species[edge_id])
         ]
-        snapshots = {}
+        snapshots: dict[str, dict[str, Any]] = {}
         for time_key in ordered_time_keys:
             if time_key not in edge_times[edge_id]:
                 continue
-            phase_fractions = {}
-            temperatures = {}
+            phase_fractions: dict[str, list[float]] = {}
+            temperatures: dict[str, list[float | None]] = {}
             for phase in edge_phases:
                 phase_fractions[phase] = []
                 temperatures[phase] = []
@@ -324,7 +324,7 @@ def _read_cell_profiles(conn: sqlite3.Connection) -> dict[str, Any]:
                         phase_fractions[phase].append(phase_fraction)
                         temperatures[phase].append(temperature)
 
-            contents = {}
+            contents: dict[str, list[float]] = {}
             for item in edge_species:
                 phase = item["phase"]
                 species_id = item["speciesId"]

@@ -573,21 +573,21 @@ class Worker:
         hyd_state = solve(self._graph, self._config.viscosity)
 
         # 2a. Update pump and MFC resistances from this tick's ΔP for the next solve
-        for entry in self._pump_entries:
+        for pump_entry in self._pump_entries:
             dp = hyd_state.pressures.get(
-                entry.upstream_node_id, 0.0
-            ) - hyd_state.pressures.get(entry.downstream_node_id, 0.0)
-            entry.comp.update_resistance(dp)
-            entry.edge.resistance_override = entry.comp.internal_edges[
+                pump_entry.upstream_node_id, 0.0
+            ) - hyd_state.pressures.get(pump_entry.downstream_node_id, 0.0)
+            pump_entry.comp.update_resistance(dp)
+            pump_entry.edge.resistance_override = pump_entry.comp.internal_edges[
                 (1, 2)
             ].resistance_override
 
-        for entry in self._mfc_entries:
+        for mfc_entry in self._mfc_entries:
             dp = hyd_state.pressures.get(
-                entry.upstream_node_id, 0.0
-            ) - hyd_state.pressures.get(entry.downstream_node_id, 0.0)
-            entry.comp.update_resistance(dp)
-            entry.edge.resistance_override = entry.comp.internal_edges[
+                mfc_entry.upstream_node_id, 0.0
+            ) - hyd_state.pressures.get(mfc_entry.downstream_node_id, 0.0)
+            mfc_entry.comp.update_resistance(dp)
+            mfc_entry.edge.resistance_override = mfc_entry.comp.internal_edges[
                 (1, 2)
             ].resistance_override
 

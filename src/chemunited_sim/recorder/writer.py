@@ -327,12 +327,14 @@ class Recorder:
         # continuous tables above (rotor position, solenoid open/closed)
         for name, component in self._components.items():
             if isinstance(component, RotaryValveData):
-                state = {"rotor_ports": component.rotor_ports}
+                component_state: dict[str, object] = {
+                    "rotor_ports": component.rotor_ports
+                }
             elif isinstance(component, (SolenoidValveData, SolenoidValve2WayData)):
-                state = {"opened": component.opened}
+                component_state = {"opened": component.opened}
             else:
                 continue
-            component_state_rows.append((t, name, json.dumps(state)))
+            component_state_rows.append((t, name, json.dumps(component_state)))
 
         try:
             with self._conn:
