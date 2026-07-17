@@ -6,6 +6,7 @@ import math
 from collections import deque
 
 import pytest
+from chemunited_core.common.constant import R_MAX_HYDRAULIC
 from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components.enums import InternalEdgeRole
 from chemunited_core.compounds import COMPOUNDS
@@ -36,6 +37,7 @@ def _edge(
     destination: str,
     *,
     role: InternalEdgeRole = InternalEdgeRole.TRANSPORT,
+    resistance_override: float | None = None,
 ) -> HydraulicEdge:
     return HydraulicEdge(
         edge_id=edge_id,
@@ -44,7 +46,7 @@ def _edge(
         length=1.0,
         diameter=1.0e-3 if role == InternalEdgeRole.TRANSPORT else 0.0,
         role=role,
-        resistance_override=None,
+        resistance_override=resistance_override,
         component=None,
         is_external=role == InternalEdgeRole.TRANSPORT,
     )
@@ -218,6 +220,70 @@ def test_hub_with_directly_attached_transport_edge_routes_pocket_reverse() -> No
     assert len(routed) == 1
     assert routed[0].volume == pytest.approx(pocket.volume)
     assert routed[0].species_moles == pytest.approx(pocket.species_moles)
+
+
+def _valve_with_closed_port_graph() -> HydraulicGraph:
+    """Mirror SixPortDistributionValve: `hub` has one OPEN junction port
+    (draining normally to `dst`) and one CLOSED junction port (an
+    unselected rotary-valve position, `resistance_override=R_MAX_HYDRAULIC`)
+    whose downstream tube still solves a tiny nonzero residual flow - the
+    finite-resistance numerical-stability trade-off documented on
+    R_MAX_HYDRAULIC. That residual flow must not let hub content leak into
+    it."""
+    graph = HydraulicGraph()
+    for node_id in ("src", "hub", "port_open", "dst", "port_closed", "leak_dst"):
+        graph.nodes[node_id] = _node(node_id, is_hub=(node_id == "hub"))
+    graph.edges["upstream"] = _edge("upstream", "src", "hub")
+    graph.edges["hub.open"] = _edge(
+        "hub.open", "hub", "port_open", role=InternalEdgeRole.JUNCTION
+    )
+    graph.edges["downstream"] = _edge("downstream", "port_open", "dst")
+    graph.edges["hub.closed"] = _edge(
+        "hub.closed",
+        "hub",
+        "port_closed",
+        role=InternalEdgeRole.JUNCTION,
+        resistance_override=R_MAX_HYDRAULIC,
+    )
+    graph.edges["leak_downstream"] = _edge("leak_downstream", "port_closed", "leak_dst")
+    return graph
+
+
+def test_closed_junction_port_excluded_from_hub_redistribution() -> None:
+    """Regression test: a hub port whose JUNCTION edge is closed (an
+    unselected rotary-valve position) must never receive hub-merged content,
+    even though its finite (not infinite) resistance still solves a tiny
+    nonzero residual flow on both the junction and its downstream tube -
+    this was leaking a slow trickle of the active port's content into
+    supposedly-isolated tubing."""
+    graph = _valve_with_closed_port_graph()
+    pocket = _hot_pocket()
+    state = TransportState(
+        edge_queues={
+            "upstream": deque([pocket]),
+            "downstream": deque(),
+            "leak_downstream": deque(),
+        }
+    )
+    hyd_state = HydraulicState(
+        pressures={},
+        flows={
+            "upstream": 1.0e-5,
+            "hub.open": 1.0e-5,
+            "downstream": 1.0e-5,
+            "hub.closed": 1.0e-11,  # tiny residual leak through R_MAX_HYDRAULIC
+            "leak_downstream": 1.0e-11,
+        },
+    )
+
+    result = advance(graph, hyd_state, state, dt=0.1)
+
+    routed = list(result.next_state.edge_queues["downstream"])
+    assert len(routed) == 1
+    assert routed[0].species_moles == pytest.approx(pocket.species_moles)
+
+    leaked = list(result.next_state.edge_queues["leak_downstream"])
+    assert all("tracer" not in p.species_moles for p in leaked)
 
 
 def test_dead_end_without_outgoing_transport_still_discards_pocket() -> None:

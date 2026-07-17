@@ -64,6 +64,14 @@ def _import_module_from_path(module_name: str, file_path: Path) -> ModuleType:
     return module
 
 
+def _clear_module_tree(module_name: str) -> None:
+    """Remove a module and all child modules from Python's import cache."""
+    prefix = f"{module_name}."
+    for cached_name in tuple(sys.modules):
+        if cached_name == module_name or cached_name.startswith(prefix):
+            sys.modules.pop(cached_name, None)
+
+
 def load_project(path: Path) -> ProjectState:
     """Load a chemunited project and compile its hydraulic graph.
 
@@ -88,10 +96,10 @@ def load_project(path: Path) -> ProjectState:
         raise FileNotFoundError(f"protocols/__init__.py not found in {project_dir}")
 
     # Import draw/setup.py and run build_draw
+    setup_module_name = f"_chemunited_draw_{project_dir.name}"
     logger.debug("Importing draw/setup.py from {}", setup_path)
-    setup_module = _import_module_from_path(
-        f"_chemunited_draw_{project_dir.name}", setup_path
-    )
+    _clear_module_tree(setup_module_name)
+    setup_module = _import_module_from_path(setup_module_name, setup_path)
     if not hasattr(setup_module, "build_draw"):
         raise AttributeError(f"setup.py in {project_dir} does not define build_draw")
 
@@ -101,10 +109,10 @@ def load_project(path: Path) -> ProjectState:
     if protocols_parent not in sys.path:
         sys.path.insert(0, protocols_parent)
 
+    protocols_module_name = f"_chemunited_protocols_{project_dir.name}"
     logger.debug("Importing protocols/__init__.py from {}", protocols_init)
-    protocols_module = _import_module_from_path(
-        f"_chemunited_protocols_{project_dir.name}", protocols_init
-    )
+    _clear_module_tree(protocols_module_name)
+    protocols_module = _import_module_from_path(protocols_module_name, protocols_init)
     if not hasattr(protocols_module, "PROCESSES"):
         raise AttributeError(
             f"protocols/__init__.py in {project_dir} has no PROCESSES attribute"

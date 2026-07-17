@@ -337,7 +337,10 @@ def _process_hub(
        which is simultaneously the hub node and an external tubing
        attachment point) or reachable from this hub via a JUNCTION edge to a
        neighboring port, where the TRANSPORT edge carries flow away from the
-       port.
+       port. A JUNCTION edge whose ``resistance_override`` marks it closed
+       (an unselected valve position) is never treated as a redistribution
+       path, even if the finite closed resistance leaves it a tiny nonzero
+       solved flow.
     3. Distribute each merged pocket across outgoing edges proportionally to
        their displaced volume ``|Q|·dt``.
     4. Inject pocket fragments at the inflow end of each outgoing edge.
@@ -354,6 +357,12 @@ def _process_hub(
     )
 
     for port_id, junc_edge in junction_neighbors.get(hub_id, []):
+        if (
+            junc_edge.resistance_override is not None
+            and junc_edge.resistance_override >= R_MAX_HYDRAULIC / 2.0
+        ):
+            continue  # closed valve/BPR position - never a redistribution target
+
         Q_junc = hyd_state.flows.get(junc_edge.edge_id, 0.0)
         hub_to_port = (
             junc_edge.origin_node_id == hub_id and Q_junc > MIN_POCKET_VOLUME
