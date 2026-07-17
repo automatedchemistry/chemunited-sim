@@ -24,6 +24,8 @@ from ..adapter.models import HydraulicEdge, HydraulicGraph
 from ..common.constant import (
     AMBIENT_TEMPERATURE_K,
     ATMOSPHERE_PRESSURE_PA,
+    DEFICIT_FILL_ABS_TOL,
+    DEFICIT_FILL_REL_TOL,
     MAX_JUNCTION_HOPS,
     MIN_POCKET_VOLUME,
 )
@@ -210,7 +212,8 @@ def _fill_carrier_deficits(
 
         volume = sum(p.volume for p in queue)
         deficit = capacity - volume
-        if deficit < MIN_POCKET_VOLUME:
+        tolerance = max(DEFICIT_FILL_ABS_TOL, DEFICIT_FILL_REL_TOL * capacity)
+        if deficit < tolerance:
             continue
 
         Q = hyd_state.flows.get(edge_id, 0.0)

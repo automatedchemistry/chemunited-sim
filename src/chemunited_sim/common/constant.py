@@ -31,6 +31,14 @@ ETA_WATER_25C: float = 8.9e-4
 # Unit: m³.
 MIN_POCKET_VOLUME: float = 1e-18
 
+# Tolerance for _fill_carrier_deficits' "is this edge genuinely underfilled"
+# check. Deliberately separate from MIN_POCKET_VOLUME, which is tuned to
+# discard floating-point fragments, not to validate them - reusing it here
+# let ordinary summation drift from repeated pocket splitting get promoted
+# into permanent synthetic air pockets every tick. Unit: m³ / fraction.
+DEFICIT_FILL_ABS_TOL: float = 1e-12
+DEFICIT_FILL_REL_TOL: float = 1e-6
+
 # Safety limit on the number of JUNCTION hops a pocket may traverse in a
 # single step.  Guards against degenerate graph topologies with cycles.
 MAX_JUNCTION_HOPS: int = 32

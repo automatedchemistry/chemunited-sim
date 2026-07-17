@@ -322,6 +322,27 @@ def test_inject_pads_underfilled_transport_edge_with_air_carrier() -> None:
     assert queue[0].volume == pytest.approx(expected_volume)
 
 
+def test_inject_ignores_subtolerance_deficit_on_transport_edge() -> None:
+    graph = HydraulicGraph()
+    graph.nodes["src"] = _node("src")
+    graph.nodes["dst"] = _node("dst")
+    graph.edges["edge"] = _edge("edge", "src", "dst")
+    edge = graph.edges["edge"]
+    capacity = math.pi * (edge.diameter / 2.0) ** 2 * edge.length
+    pocket = _hot_pocket(volume=capacity - 1.0e-13)
+    state = TransportState(edge_queues={"edge": deque([pocket])})
+    hyd_state = HydraulicState(
+        pressures={"src": 150_000.0},
+        flows={"edge": 1.0e-6},
+    )
+
+    result = inject(state, {}, hyd_state, graph)
+
+    queue = list(result.edge_queues["edge"])
+    assert len(queue) == 1
+    assert queue[0] is pocket
+
+
 def test_transport_heat_exchange_applies_stable_plug_flow_ua_model() -> None:
     pocket = Pocket(
         phase_kind=PhaseKind.GAS,
