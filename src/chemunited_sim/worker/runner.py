@@ -667,6 +667,9 @@ class Worker:
             )
 
         # 8. Emit replacement pockets from inventories
+        self._port_map = build_port_map(
+            self._graph, list(self._components_by_name.values())
+        )
         emitted = emit(
             self._inv_states,
             result.departures,

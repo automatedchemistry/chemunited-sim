@@ -67,7 +67,8 @@ The adapter compiles a platform into:
 
 `adapter.resync_component()` re-propagates a component's internal-edge
 resistance overrides into the compiled graph after runtime commands
-(e.g. valve switches); topology never changes after compilation.
+(e.g. valve switches); the compiled topology never changes. The solver derives
+active hydraulic connectivity from current conductances on every solve.
 
 All lengths, diameters, volumes, pressures, flows, temperatures, and
 resistances are converted to SI values before simulation modules consume them.
@@ -90,8 +91,12 @@ Boundary handling:
 
 Resistance handling (per edge, in priority order):
 
+Overrides at or above `R_MAX_HYDRAULIC / 2` are hard-closed before ordinary
+resistance handling. They contribute zero conductance, are excluded from active
+connected-component detection, and report exactly zero flow.
+
 1. `resistance_override` is used directly when set — this is how pumps,
-   MFCs, BPRs, and closed valve channels are represented.
+   MFCs and BPRs are represented.
 2. Junction edges use the small epsilon resistance `R_JUNCTION`
    (nearly lossless, keeps the matrix well-conditioned).
 3. Transport edges use Hagen-Poiseuille resistance
@@ -127,9 +132,10 @@ outgoing transport edge may be attached directly to the hub node itself
 the hub and an external tubing attachment point) as well as reachable one
 JUNCTION hop away at a neighboring port — both shapes are searched.
 
-Edges closed by a large resistance override, or with zero flow, carry their
-queues forward unchanged. Pockets below `MIN_POCKET_VOLUME` are discarded at
-the end of each step.
+Hard-closed edges carry their queues forward unchanged. Junction traversal,
+hub redistribution, and inventory resolution reject the same closed marker
+independently of solved flow. Pockets below `MIN_POCKET_VOLUME` are discarded
+at the end of each step.
 
 `advance()` also reports departures: the volume that left the
 inventory-connected end of each transport edge, which drives inventory

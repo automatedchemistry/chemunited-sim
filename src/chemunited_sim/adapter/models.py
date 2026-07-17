@@ -88,7 +88,7 @@ class HydraulicEdge:
                              JUNCTION  = lossless, R = 0.
         resistance_override: None = compute from geometry.
                              float = use directly (Pa*s/m3).
-                             R_MAX_HYDRAULIC = effectively closed channel.
+                             R_MAX_HYDRAULIC = hard-closed, zero-conductance channel.
         component:           Owning component name; None for external edges.
         is_external:         True for edges derived from EdgeData (physical tubing).
     """

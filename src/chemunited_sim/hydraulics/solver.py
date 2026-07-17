@@ -19,6 +19,7 @@ from chemunited_core.components.enums import BoundaryConditionKind, InternalEdge
 
 from ..adapter.models import HydraulicEdge, HydraulicGraph
 from ..common.constant import ETA_WATER_25C, R_JUNCTION
+from ..common.edges import is_hydraulically_closed
 from .models import HydraulicSolveError, HydraulicState
 
 
@@ -125,6 +126,10 @@ def solve(
     edge_conductances: dict[str, float] = {}
 
     for edge_id, edge in edges.items():
+        if is_hydraulically_closed(edge):
+            edge_conductances[edge_id] = 0.0
+            continue
+
         R = _compute_resistance(edge, viscosity)
         G = 1.0 / R
         i = node_idx[edge.origin_node_id]
@@ -136,11 +141,13 @@ def solve(
         edge_conductances[edge_id] = G
 
     # ------------------------------------------------------------------
-    # Pass 2: connected-component detection (structural, before BC rows)
+    # Pass 2: active connected-component detection (before BC rows)
     # ------------------------------------------------------------------
     adj_rows: list[int] = []
     adj_cols: list[int] = []
-    for edge in edges.values():
+    for edge_id, edge in edges.items():
+        if edge_conductances[edge_id] == 0.0:
+            continue
         i = node_idx[edge.origin_node_id]
         j = node_idx[edge.destination_node_id]
         adj_rows += [i, j]

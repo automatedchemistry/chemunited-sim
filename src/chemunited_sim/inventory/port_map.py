@@ -11,12 +11,15 @@ not rebuild the graph, so this map remains valid for the entire simulation run.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 from chemunited_core.components import ComponentData, FlowSourceData
 from chemunited_core.components.enums import InternalEdgeRole, PortAccess
 
-from ..adapter.models import HydraulicGraph
+from ..adapter.models import HydraulicEdge, HydraulicGraph
+from ..common.constant import MAX_JUNCTION_HOPS
+from ..common.edges import is_hydraulically_closed
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,44 @@ class EdgePortAccess:
 
     inv_node_id: str
     access: PortAccess
+
+
+def _is_open_junction(edge: HydraulicEdge) -> bool:
+    return edge.role == InternalEdgeRole.JUNCTION and not is_hydraulically_closed(edge)
+
+
+def _junction_neighbors(graph: HydraulicGraph) -> dict[str, list[str]]:
+    neighbors: dict[str, list[str]] = {}
+    for edge in graph.edges.values():
+        if not _is_open_junction(edge):
+            continue
+        neighbors.setdefault(edge.origin_node_id, []).append(edge.destination_node_id)
+        neighbors.setdefault(edge.destination_node_id, []).append(edge.origin_node_id)
+    return neighbors
+
+
+def _nearest_inventory_port(
+    start_node_id: str,
+    port_to_inv: dict[str, str],
+    neighbors: dict[str, list[str]],
+) -> tuple[str, str] | None:
+    queue: deque[tuple[str, int]] = deque([(start_node_id, 0)])
+    seen = {start_node_id}
+
+    while queue:
+        node_id, depth = queue.popleft()
+        inv_node_id = port_to_inv.get(node_id)
+        if inv_node_id is not None:
+            return node_id, inv_node_id
+        if depth >= MAX_JUNCTION_HOPS:
+            continue
+        for neighbor_id in neighbors.get(node_id, []):
+            if neighbor_id in seen:
+                continue
+            seen.add(neighbor_id)
+            queue.append((neighbor_id, depth + 1))
+
+    return None
 
 
 # Mapping from transport edge_id to its port-access metadata.
@@ -102,21 +143,25 @@ def build_port_map(
             return None
         return getattr(port, "access", None)
 
-    # Step 3: build PortAccessMap from TRANSPORT edges
+    # Step 3: build PortAccessMap from TRANSPORT edges. Direct vessel
+    # endpoints still resolve immediately; autosampler paths may resolve
+    # through currently open JUNCTION edges.
+    neighbors = _junction_neighbors(graph)
     port_map: PortAccessMap = {}
     for eid, edge in graph.edges.items():
         if edge.role != InternalEdgeRole.TRANSPORT:
             continue
         for node_id in (edge.origin_node_id, edge.destination_node_id):
-            if node_id not in port_to_inv:
+            resolved = _nearest_inventory_port(node_id, port_to_inv, neighbors)
+            if resolved is None:
                 continue
-            comp_name = node_id.rsplit(".", 1)[0]
+            port_node_id, inv_node_id = resolved
+            comp_name = port_node_id.rsplit(".", 1)[0]
             if comp_name in source_names:
                 continue
-            inv_node_id = port_to_inv[node_id]
-            access = _get_access(node_id)
+            access = _get_access(port_node_id)
             if access is not None:
                 port_map[eid] = EdgePortAccess(inv_node_id=inv_node_id, access=access)
-                break  # each edge has at most one inventory endpoint
+                break  # each edge has at most one active inventory source
 
     return port_map

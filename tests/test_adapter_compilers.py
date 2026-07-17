@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import pytest
+from chemunited_core.common.constant import ATMOSPHERE_PRESSURE_PA
 from chemunited_core.common.enums import ConnectionType
+from chemunited_core.components.enums import BoundaryConditionKind
 from chemunited_core.connections import EdgeData, EdgeMode
 from chemunited_core.figure_registry import COMPONENTS
 
-from chemunited_sim.adapter import compile_graph
+from chemunited_sim.adapter import compile_graph, resync_component
 
 
 def test_solenoid_valve_2_way_common_port_compiles_as_hub():
@@ -22,6 +24,71 @@ def test_solenoid_valve_2_way_common_port_compiles_as_hub():
     assert graph.nodes["divertvalve.0"].is_hub is True
     assert graph.nodes["divertvalve.1"].is_hub is False
     assert graph.nodes["divertvalve.2"].is_hub is False
+
+
+def test_autosampler_vial_movement_contact_compiles_as_hydraulic_junction():
+    gantry_defn = COMPONENTS["Gantry3D"]
+    vial_defn = COMPONENTS["Vial"]
+    gantry = gantry_defn.data_class.from_mode(
+        gantry_defn.mode_class(
+            name="as", position_x="1", position_y="A", position_z="DOWN"
+        )
+    )
+    vial = vial_defn.data_class.from_mode(
+        vial_defn.mode_class(name="tray", column=3, row=2, pressure_access=False)
+    )
+    contact = EdgeData.from_mode(
+        EdgeMode(
+            name="tray_1_as_2",
+            origin="tray",
+            origin_port=1,
+            destination="as",
+            destination_port=2,
+            classification=ConnectionType.MOVEMENT,
+        )
+    )
+
+    graph = compile_graph([gantry, vial], [contact])
+
+    assert "as.1" in graph.nodes
+    assert "as.2" in graph.nodes
+    assert "tray.1" in graph.nodes
+    assert "tray.A1" in graph.nodes
+    assert graph.nodes["as.1"].boundary is None
+    assert graph.nodes["tray.1"].boundary is not None
+    assert graph.edges["as.1.2"].resistance_override is None
+    assert graph.edges["as.1.3"].resistance_override is not None
+    assert graph.edges["tray.1.A1"].origin_node_id == "tray.1"
+    assert graph.edges["tray_1_as_2"].role.name == "JUNCTION"
+    assert graph.edges["tray_1_as_2"].length == 0.0
+    assert graph.edges["tray_1_as_2"].diameter == 0.0
+    assert "tray.A1" in graph.inventory_nodes
+
+
+def test_resync_component_updates_gantry_head_boundary():
+    gantry_defn = COMPONENTS["Gantry3D"]
+    gantry = gantry_defn.data_class.from_mode(
+        gantry_defn.mode_class(name="as", position_z="UP")
+    )
+    graph = compile_graph([gantry], [])
+
+    boundary = graph.nodes["as.1"].boundary
+    assert boundary is not None
+    assert boundary.kind == BoundaryConditionKind.PRESSURE
+    assert boundary.value == ATMOSPHERE_PRESSURE_PA
+
+    gantry.apply("set_z_position", position="DOWN")
+    resync_component(graph, gantry)
+
+    assert graph.nodes["as.1"].boundary is None
+
+    gantry.apply("set_z_position", position="UP")
+    resync_component(graph, gantry)
+
+    boundary = graph.nodes["as.1"].boundary
+    assert boundary is not None
+    assert boundary.kind == BoundaryConditionKind.PRESSURE
+    assert boundary.value == ATMOSPHERE_PRESSURE_PA
 
 
 def test_heat_connection_compiles_as_heat_link_not_hydraulic_edge():

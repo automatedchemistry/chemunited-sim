@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import pytest
-from chemunited_core.common.enums import PhaseKind
+from chemunited_core.common.enums import ConnectionType, PhaseKind
 from chemunited_core.components.enums import PortAccess
 from chemunited_core.compounds.entity import IDEAL_GAS_CONSTANT
+from chemunited_core.connections import EdgeData, EdgeMode
+from chemunited_core.figure_registry import COMPONENTS
 
+from chemunited_sim.adapter import compile_graph
 from chemunited_sim.hydraulics.models import HydraulicState
 from chemunited_sim.inventory.engine import assimilate, emit
 from chemunited_sim.inventory.models import InventoryState
-from chemunited_sim.inventory.port_map import EdgePortAccess
+from chemunited_sim.inventory.port_map import EdgePortAccess, build_port_map
 from chemunited_sim.transport.models import Pocket
 
 
@@ -164,3 +167,67 @@ def test_variable_volume_inventory_can_grow_on_assimilation():
     assert state.liq_volume == pytest.approx(6.0e-7)
     assert state.gas_volume == pytest.approx(5.0e-7)
     assert state.liq_volume + state.gas_volume == pytest.approx(state.capacity + 1.0e-7)
+
+
+def test_autosampler_transport_edge_emits_liquid_from_selected_vial():
+    gantry_defn = COMPONENTS["Gantry3D"]
+    vial_defn = COMPONENTS["Vial"]
+    sink_defn = COMPONENTS["PressureControl"]
+    gantry = gantry_defn.data_class.from_mode(
+        gantry_defn.mode_class(
+            name="as", position_x="1", position_y="A", position_z="DOWN"
+        )
+    )
+    vial = vial_defn.data_class.from_mode(
+        vial_defn.mode_class(name="tray", column=3, row=2, pressure_access=False)
+    )
+    sink = sink_defn.data_class.from_mode(sink_defn.mode_class(name="sink"))
+    contact = EdgeData.from_mode(
+        EdgeMode(
+            name="tray_1_as_2",
+            origin="tray",
+            origin_port=1,
+            destination="as",
+            destination_port=2,
+            classification=ConnectionType.MOVEMENT,
+        )
+    )
+    outlet = EdgeData.from_mode(
+        EdgeMode(
+            name="as_1_sink_1",
+            origin="as",
+            origin_port=1,
+            destination="sink",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length="100 mm",
+            diameter="1 mm",
+        )
+    )
+    graph = compile_graph([gantry, vial, sink], [contact, outlet])
+
+    port_map = build_port_map(graph, [gantry, vial, sink])
+
+    assert port_map["as_1_sink_1"] == EdgePortAccess("tray.A1", PortAccess.BOTTOM)
+
+    state = InventoryState(
+        node_id="tray.A1",
+        capacity=1.0e-6,
+        pressure=101_325.0,
+        temperature=300.0,
+        liq_volume=1.0e-6,
+        gas_volume=0.0,
+        liq_species_moles={"HeavyWater": 1.0},
+        gas_species_moles={},
+    )
+    emitted = emit(
+        {"tray.A1": state},
+        {"as_1_sink_1": 1.0e-9},
+        port_map,
+    )
+
+    pocket = emitted["as_1_sink_1"]
+    assert pocket.phase_kind == PhaseKind.LIQUID
+    assert pocket.species_moles == {"HeavyWater": pytest.approx(1.0e-3)}
+    assert state.liq_volume == pytest.approx(9.99e-7)
+    assert state.liq_species_moles["HeavyWater"] == pytest.approx(0.999)

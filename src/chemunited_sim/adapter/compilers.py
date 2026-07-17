@@ -27,6 +27,7 @@ from chemunited_core.components import (
     VesselComponentData,
 )
 from chemunited_core.components.enums import InternalEdgeRole, PortClosure
+from chemunited_core.figure_registry import Gantry3DData, VialData
 from loguru import logger
 
 from .models import HydraulicEdge, HydraulicNode
@@ -36,14 +37,19 @@ from .models import HydraulicEdge, HydraulicNode
 # ---------------------------------------------------------------------------
 
 
-def _is_hydraulic_active(port) -> bool:  # type: ignore[no-untyped-def]
+def _is_hydraulic_active(port, comp=None) -> bool:  # type: ignore[no-untyped-def]
     """Return ``True`` if *port* should become a hydraulic node.
 
-    A port is included when its category is ``ConnectionType.HYDRAULIC`` and
-    its closure is not ``PortClosure.CAPPED``.
+    Standard hydraulic ports are included. Gantry/vial MOVEMENT ports are
+    also included so autosampler tray contacts can participate in hydraulics
+    without making every MOVEMENT edge a fluid path.
     """
-    return (
-        port.category == ConnectionType.HYDRAULIC and port.closure != PortClosure.CAPPED
+    if port.closure == PortClosure.CAPPED:
+        return False
+    if port.category == ConnectionType.HYDRAULIC:
+        return True
+    return port.category == ConnectionType.MOVEMENT and isinstance(
+        comp, (Gantry3DData, VialData)
     )
 
 
@@ -82,7 +88,7 @@ def compile_plugflow(
     valid_port_numbers: set[int | str] = set()
 
     for port_number, port in comp.ports_by_number.items():
-        if not _is_hydraulic_active(port):
+        if not _is_hydraulic_active(port, comp):
             continue
         nodes.append(
             HydraulicNode(
@@ -144,7 +150,7 @@ def compile_vessel(
     valid_port_numbers: set[int | str] = set()
 
     for port_number, port in comp.ports_by_number.items():
-        if not _is_hydraulic_active(port):
+        if not _is_hydraulic_active(port, comp):
             continue
         nodes.append(
             HydraulicNode(
@@ -156,26 +162,27 @@ def compile_vessel(
         )
         valid_port_numbers.add(port_number)
 
-    # Inventory node — always emitted for vessels
-    inv_node = HydraulicNode(
-        node_id=f"{comp.name}.Inventory",
-        boundary=None,
-        is_hub=False,
-        component=comp.name,
-    )
-    nodes.append(inv_node)
+    for inventory_key in comp.internal_inventories:
+        nodes.append(
+            HydraulicNode(
+                node_id=f"{comp.name}.{inventory_key}",
+                boundary=None,
+                is_hub=False,
+                component=comp.name,
+            )
+        )
 
     edges: list[HydraulicEdge] = []
     for (port_number, dest), edge in comp.internal_edges.items():
-        if dest != "Inventory":
+        if dest not in comp.internal_inventories:
             continue
         if port_number not in valid_port_numbers:
             continue
         edges.append(
             HydraulicEdge(
-                edge_id=f"{comp.name}.{port_number}.Inventory",
+                edge_id=f"{comp.name}.{port_number}.{dest}",
                 origin_node_id=f"{comp.name}.{port_number}",
-                destination_node_id=f"{comp.name}.Inventory",
+                destination_node_id=f"{comp.name}.{dest}",
                 length=edge.length,
                 diameter=edge.diameter,
                 role=InternalEdgeRole.JUNCTION,
@@ -216,7 +223,7 @@ def compile_valve(
     valid_port_numbers: set[int | str] = set()
 
     for port_number, port in comp.ports_by_number.items():
-        if not _is_hydraulic_active(port):
+        if not _is_hydraulic_active(port, comp):
             continue
         nodes.append(
             HydraulicNode(
@@ -280,7 +287,7 @@ def compile_flow_source(
     if port is None:
         return nodes, []
 
-    if not _is_hydraulic_active(port):
+    if not _is_hydraulic_active(port, comp):
         logger.warning(
             "compile_flow_source: component '{}' port 1 is CAPPED - "
             "this flow source is degenerate and will have no effect on the network.",
@@ -355,7 +362,7 @@ def compile_pressure_control(
     if port is None:
         return nodes, []
 
-    if not _is_hydraulic_active(port):
+    if not _is_hydraulic_active(port, comp):
         return nodes, []
 
     nodes.append(
@@ -407,7 +414,7 @@ def compile_junction(
     for port_number, port in comp.ports_by_number.items():
         if port_number == 0:
             continue  # hub is handled above
-        if not _is_hydraulic_active(port):
+        if not _is_hydraulic_active(port, comp):
             continue
         nodes.append(
             HydraulicNode(
@@ -475,7 +482,7 @@ def compile_component(
     valid_node_ids: set[str] = set()
 
     for port_number, port in comp.ports_by_number.items():
-        if not _is_hydraulic_active(port):
+        if not _is_hydraulic_active(port, comp):
             continue
         node_id = f"{comp.name}.{port_number}"
         nodes.append(

@@ -9,6 +9,7 @@ simulation kernel.
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 
 from chemunited_core.common.enums import ConnectionType
 from chemunited_core.components import ComponentData, NeutralComponentData
@@ -16,6 +17,7 @@ from chemunited_core.components.enums import InternalEdgeRole
 from chemunited_core.components.internals import InventoryNode
 from chemunited_core.components.plugflow import PlugFlowComponentData
 from chemunited_core.connections.edge import EdgeData
+from chemunited_core.figure_registry import Gantry3DData, VialData
 from loguru import logger
 
 from .compilers import _COMPILERS, compile_component
@@ -23,15 +25,17 @@ from .models import HeatLink, HydraulicEdge, HydraulicGraph, HydraulicNode
 
 
 def resync_component(graph: HydraulicGraph, comp: ComponentData) -> None:
-    """Propagate resistance_override from ComponentData into HydraulicGraph.
+    """Propagate mutable component state into HydraulicGraph.
 
     Called immediately after ComponentData.apply(). Topology is never changed;
-    only edge attributes are written.
-
-    HydraulicNode.boundary is a shared reference (not deep-copied at compile
-    time), so flow-source and pressure-control updates propagate automatically
-    via sync_internal_state() — no node propagation needed here.
+    edge resistance overrides and port boundaries are refreshed in-place.
     """
+    for port_number, port in comp.ports_by_number.items():
+        node_id = f"{comp.name}.{port_number}"
+        node = graph.nodes.get(node_id)
+        if node is not None:
+            graph.nodes[node_id] = replace(node, boundary=port.boundary)
+
     for (origin, dest), internal_edge in comp.internal_edges.items():
         edge_id = f"{comp.name}.{origin}.{dest}"
         hydraulic_edge = graph.edges.get(edge_id)
@@ -54,6 +58,19 @@ def _is_heat_provider(comp: ComponentData) -> bool:
 
 def _is_heat_target(comp: ComponentData) -> bool:
     return bool(getattr(comp, "heat_exchange", False)) and not _is_heat_provider(comp)
+
+
+def _is_autosampler_contact_edge(
+    edge_data: EdgeData, components_by_name: dict[str, ComponentData]
+) -> bool:
+    if edge_data.classification != ConnectionType.MOVEMENT:
+        return False
+
+    origin = components_by_name.get(edge_data.origin)
+    destination = components_by_name.get(edge_data.destination)
+    return (isinstance(origin, Gantry3DData) and isinstance(destination, VialData)) or (
+        isinstance(origin, VialData) and isinstance(destination, Gantry3DData)
+    )
 
 
 def _compile_heat_link(
@@ -190,17 +207,23 @@ def compile_graph(
                 edge.content = list(comp.content)
             all_edges[edge.edge_id] = edge
 
-        # Inventory snapshot (deep copy to decouple from live component state)
-        if comp.internal_inventory is not None:
-            inv_id = f"{comp.name}.Inventory"
-            all_inventory[inv_id] = copy.deepcopy(comp.internal_inventory)
+        # Inventory snapshots (deep copy to decouple from live component state)
+        for inventory_key, inventory in comp.internal_inventories.items():
+            inv_id = f"{comp.name}.{inventory_key}"
+            all_inventory[inv_id] = copy.deepcopy(inventory)
 
     # ------------------------------------------------------------------
     # Pass 2: external edges
     # ------------------------------------------------------------------
     for edge_data in edges:
-        if edge_data.classification != ConnectionType.HYDRAULIC:
-            continue  # silently skip non-HYDRAULIC edges
+        is_autosampler_contact = _is_autosampler_contact_edge(
+            edge_data, components_by_name
+        )
+        if (
+            edge_data.classification != ConnectionType.HYDRAULIC
+            and not is_autosampler_contact
+        ):
+            continue  # silently skip unrelated non-HYDRAULIC edges
 
         origin_node_id = f"{edge_data.origin}.{edge_data.origin_port}"
         dest_node_id = f"{edge_data.destination}.{edge_data.destination_port}"
@@ -232,9 +255,13 @@ def compile_graph(
             edge_id=edge_data.name,
             origin_node_id=origin_node_id,
             destination_node_id=dest_node_id,
-            length=edge_data.length_value,
-            diameter=edge_data.diameter_value,
-            role=InternalEdgeRole.TRANSPORT,
+            length=0.0 if is_autosampler_contact else edge_data.length_value,
+            diameter=0.0 if is_autosampler_contact else edge_data.diameter_value,
+            role=(
+                InternalEdgeRole.JUNCTION
+                if is_autosampler_contact
+                else InternalEdgeRole.TRANSPORT
+            ),
             resistance_override=None,
             component=None,
             is_external=True,

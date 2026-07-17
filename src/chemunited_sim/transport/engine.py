@@ -13,7 +13,6 @@ import math
 from collections import defaultdict, deque
 from dataclasses import dataclass
 
-from chemunited_core.common.constant import R_MAX_HYDRAULIC
 from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components.enums import InternalEdgeRole
 from chemunited_core.compounds import COMPOUNDS
@@ -29,6 +28,7 @@ from ..common.constant import (
     MAX_JUNCTION_HOPS,
     MIN_POCKET_VOLUME,
 )
+from ..common.edges import is_hydraulically_closed
 from ..hydraulics.models import HydraulicState
 from .junction import merge_arriving_pockets
 from .models import Pocket, TransportResult, TransportState
@@ -280,6 +280,8 @@ def _route_pocket(
         # Follow the JUNCTION edge whose flow points away from current.
         next_node: str | None = None
         for neighbor_id, edge in junction_neighbors.get(current, []):
+            if is_hydraulically_closed(edge):
+                continue
             Q = hyd_state.flows.get(edge.edge_id, 0.0)
             if edge.origin_node_id == current and Q > MIN_POCKET_VOLUME:
                 next_node = neighbor_id
@@ -312,12 +314,27 @@ def _connects_to_inventory(
     graph: HydraulicGraph,
     junction_neighbors: dict[str, list[tuple[str, HydraulicEdge]]],
 ) -> bool:
-    """Return True if *node_id* is or directly neighbours an inventory node."""
+    """Return True when *node_id* reaches inventory through open junctions."""
     if node_id in graph.inventory_nodes:
         return True
-    return any(
-        nb in graph.inventory_nodes for nb, _ in junction_neighbors.get(node_id, [])
-    )
+
+    queue: deque[tuple[str, int]] = deque([(node_id, 0)])
+    seen = {node_id}
+    while queue:
+        current_node_id, depth = queue.popleft()
+        if depth >= MAX_JUNCTION_HOPS:
+            continue
+        for neighbor_id, junction_edge in junction_neighbors.get(current_node_id, []):
+            if is_hydraulically_closed(junction_edge):
+                continue
+            if neighbor_id in graph.inventory_nodes:
+                return True
+            if neighbor_id in seen:
+                continue
+            seen.add(neighbor_id)
+            queue.append((neighbor_id, depth + 1))
+
+    return False
 
 
 def _process_hub(
@@ -360,10 +377,7 @@ def _process_hub(
     )
 
     for port_id, junc_edge in junction_neighbors.get(hub_id, []):
-        if (
-            junc_edge.resistance_override is not None
-            and junc_edge.resistance_override >= R_MAX_HYDRAULIC / 2.0
-        ):
+        if is_hydraulically_closed(junc_edge):
             continue  # closed valve/BPR position - never a redistribution target
 
         Q_junc = hyd_state.flows.get(junc_edge.edge_id, 0.0)
@@ -561,10 +575,7 @@ def advance(
             continue
 
         # Skip closed edges (R_MAX_HYDRAULIC means no flow)
-        if (
-            edge.resistance_override is not None
-            and edge.resistance_override >= R_MAX_HYDRAULIC / 2.0
-        ):
+        if is_hydraulically_closed(edge):
             continue
 
         Q = hyd_state.flows.get(eid, 0.0)
