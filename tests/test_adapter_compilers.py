@@ -91,6 +91,51 @@ def test_resync_component_updates_gantry_head_boundary():
     assert boundary.value == ATMOSPHERE_PRESSURE_PA
 
 
+def test_hplc_pump_compiles_forced_flow_onto_its_junction_edge():
+    pump_defn = COMPONENTS["HPLCPump"]
+    pump = pump_defn.data_class.from_mode(pump_defn.mode_class(name="hplcpump"))
+    pump.apply("infuse", rate="1 ml/min")
+
+    graph = compile_graph([pump], [])
+
+    edge = graph.edges["hplcpump.1.2"]
+    assert edge.resistance_override is None
+    assert edge.forced_flow == pytest.approx(
+        pump.internal_edges[(1, 2)].forced_flow_override
+    )
+    assert edge.forced_flow > 0.0
+
+
+def test_resync_component_propagates_pump_forced_flow():
+    """Regression test for the HPLCPump backward-flow bug's second cause:
+    resync_component() must propagate forced_flow (not just
+    resistance_override), or the very next solve after a command sees a
+    stale/None forced_flow on an already-open edge.
+    """
+    pump_defn = COMPONENTS["HPLCPump"]
+    pump = pump_defn.data_class.from_mode(pump_defn.mode_class(name="hplcpump"))
+    graph = compile_graph([pump], [])
+
+    edge = graph.edges["hplcpump.1.2"]
+    assert edge.resistance_override is not None
+    assert edge.forced_flow is None
+
+    pump.apply("infuse", rate="2 ml/min")
+    resync_component(graph, pump)
+
+    assert edge.resistance_override is None
+    assert edge.forced_flow == pytest.approx(
+        pump.internal_edges[(1, 2)].forced_flow_override
+    )
+    assert edge.forced_flow > 0.0
+
+    pump.apply("stop")
+    resync_component(graph, pump)
+
+    assert edge.resistance_override is not None
+    assert edge.forced_flow is None
+
+
 def test_heat_connection_compiles_as_heat_link_not_hydraulic_edge():
     controller_defn = COMPONENTS["TemperatureControl"]
     vessel_defn = COMPONENTS["GlassBottle"]

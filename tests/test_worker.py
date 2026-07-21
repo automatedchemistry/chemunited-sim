@@ -29,7 +29,7 @@ from chemunited_core.connections import EdgeData, EdgeMode
 from chemunited_core.figure_registry import COMPONENTS
 from chemunited_quantities import ChemUnitQuantity
 
-from chemunited_sim.adapter import compile_graph
+from chemunited_sim.adapter import compile_graph, resync_component
 from chemunited_sim.recorder import Recorder
 from chemunited_sim.worker import SimConfig, Worker
 
@@ -157,6 +157,50 @@ def _make_bpr_platform(setpoint_bar: float = 1.2):
     components = [src, tube, bpr, snk]
     graph = compile_graph(components, [e1, e2, e3])
     return graph, components
+
+
+def _make_pump_platform(src_bar: float = 1.0, snk_bar: float = 5.0):
+    """src (src_bar) -> HPLCPump -> snk (snk_bar).
+
+    Defaults to genuine adverse back-pressure (snk_bar > src_bar) -- the
+    scenario in which the old dp/Q resistance-matching iteration could settle
+    on a wrong-signed (backward) flow for many ticks.
+    """
+    src = PressureControlData.from_mode(
+        PressureControlMode(name="src", setpoint=ChemUnitQuantity(f"{src_bar} bar"))
+    )
+    pump_defn = COMPONENTS["HPLCPump"]
+    pump = pump_defn.data_class.from_mode(pump_defn.mode_class(name="hplcpump"))
+    snk = PressureControlData.from_mode(
+        PressureControlMode(name="snk", setpoint=ChemUnitQuantity(f"{snk_bar} bar"))
+    )
+    e_in = EdgeData.from_mode(
+        EdgeMode(
+            name="ein",
+            origin="src",
+            origin_port=1,
+            destination="hplcpump",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=ChemUnitQuantity("5 cm"),
+            diameter=ChemUnitQuantity("4 mm"),
+        )
+    )
+    e_out = EdgeData.from_mode(
+        EdgeMode(
+            name="eout",
+            origin="hplcpump",
+            origin_port=2,
+            destination="snk",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=ChemUnitQuantity("5 cm"),
+            diameter=ChemUnitQuantity("4 mm"),
+        )
+    )
+    components = [src, pump, snk]
+    graph = compile_graph(components, [e_in, e_out])
+    return graph, components, pump
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +425,78 @@ def test_bpr_closed_blocks_flow():
     w = Worker(graph, components, cfg)
     w.step()
     assert abs(w.hyd_state.flows.get("bpr.1.2", 0.0)) < 1e-6
+
+
+def test_bpr_never_carries_backward_flow_when_downstream_pressure_spikes():
+    """Regression test: a BPR is a one-way check valve and must never carry
+    flow backward, even after it has already opened, if something downstream
+    later pushes pressure above upstream.
+    """
+    graph, components = _make_bpr_platform(setpoint_bar=1.2)
+    comp_by_name = {c.name: c for c in components}
+    cfg = SimConfig(dt=0.1, t_end=3.0)
+    w = Worker(graph, components, cfg)
+
+    # Let the BPR open normally (src=3 bar > setpoint=1.2 bar).
+    for _ in range(5):
+        w.step()
+    assert graph.edges["bpr.1.2"].resistance_override != pytest.approx(R_MAX_HYDRAULIC)
+    assert w.hyd_state.flows["bpr.1.2"] > 0.0
+
+    # Push downstream pressure above upstream -- nothing should ever flow
+    # from snk back through the BPR toward src, no matter how the BPR's own
+    # open/close state reacts to it.
+    snk = comp_by_name["snk"]
+    snk.setpoint = ChemUnitQuantity("10 bar")
+    snk.sync_internal_state()
+    resync_component(graph, snk)
+
+    for _ in range(20):
+        w.step()
+        assert w.hyd_state.flows["bpr.1.2"] >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# 8. Pump forced flow against back-pressure (HPLCPump backward-flow regression)
+# ---------------------------------------------------------------------------
+
+
+def test_pump_forces_exact_flow_against_backpressure_from_first_step():
+    """Regression test for the reported bug: a pump commanded to infuse
+    against real back-pressure (downstream setpoint > upstream setpoint)
+    must carry exactly the commanded flow, correctly signed, from the very
+    first solved step -- never zero, and never backward, not even
+    transiently.
+    """
+    graph, components, pump = _make_pump_platform(src_bar=1.0, snk_bar=5.0)
+    pump.apply("infuse", rate="1 ml/min")
+    resync_component(graph, pump)
+    expected_flow_si = float(ChemUnitQuantity("1 ml/min").to_base_units().magnitude)
+
+    cfg = SimConfig(dt=0.1, t_end=1.0)
+    w = Worker(graph, components, cfg)
+
+    for _ in range(10):
+        w.step()
+        assert w.hyd_state is not None
+        assert w.hyd_state.flows["hplcpump.1.2"] == pytest.approx(expected_flow_si)
+
+
+def test_pump_stop_closes_edge_and_stops_flow():
+    graph, components, pump = _make_pump_platform(src_bar=1.0, snk_bar=5.0)
+    pump.apply("infuse", rate="1 ml/min")
+    resync_component(graph, pump)
+
+    cfg = SimConfig(dt=0.1, t_end=0.2)
+    w = Worker(graph, components, cfg)
+    w.step()
+
+    pump.apply("stop")
+    resync_component(graph, pump)
+    w.step()
+
+    assert w.hyd_state is not None
+    assert w.hyd_state.flows["hplcpump.1.2"] == pytest.approx(0.0, abs=1e-12)
 
 
 def test_worker_heat_connection_uses_live_controller_temperature():

@@ -29,10 +29,15 @@ sources) can be re-evaluated each tick.
 `Worker.step()` applies one operator-splitting time step:
 
 1. Solve hydraulics.
-2. Update resistance overrides for active elements from the solved
-   pressures, so the *next* solve uses correct values:
-   - Pumps and MFCs: `comp.update_resistance(dp)` from the edge pressure
-     drop (pump resistance can be negative — active element model).
+2. Refresh active-element edge state for the *next* solve:
+   - Pumps: `comp.sync_forced_flow()` copies `flow_rate` straight onto the
+     edge's `forced_flow` override — a hard flow-source constraint, not
+     resistance-derived, so it needs no pressure feedback and cannot be
+     wrong-signed by back-pressure.
+   - MFCs: `comp.update_resistance(dp)` from the edge pressure drop, same as
+     before — an MFC is a controlled variable-resistance element (like a
+     valve), not a forced-flow source, so it still responds to real
+     back-pressure.
    - BPRs: see [Back-Pressure Regulators](#back-pressure-regulators).
 3. Record the current state if a `Recorder` is attached and the record
    interval is due.
@@ -61,14 +66,15 @@ The adapter compiles a platform into:
   hub, optionally carrying a boundary condition.
 - `HydraulicEdge`: an internal component channel or external connection.
   Mutable — the worker rewrites `resistance_override` in-place each tick for
-  pump, MFC, BPR, and valve edges.
+  MFC, BPR, and valve edges, and `forced_flow` for pump edges.
 - `HydraulicGraph`: dictionaries of nodes and edges, plus deep-copied
   `InventoryNode` snapshots used to seed inventory states.
 
 `adapter.resync_component()` re-propagates a component's internal-edge
-resistance overrides into the compiled graph after runtime commands
-(e.g. valve switches); the compiled topology never changes. The solver derives
-active hydraulic connectivity from current conductances on every solve.
+resistance and forced-flow overrides into the compiled graph after runtime
+commands (e.g. valve switches, pump infuse/stop); the compiled topology never
+changes. The solver derives active hydraulic connectivity from current
+conductances on every solve.
 
 All lengths, diameters, volumes, pressures, flows, temperatures, and
 resistances are converted to SI values before simulation modules consume them.
@@ -89,17 +95,22 @@ Boundary handling:
 - Connected components without pressure boundaries are anchored to
   atmosphere at one node to keep the system non-singular.
 
-Resistance handling (per edge, in priority order):
+Per-edge handling, in priority order:
 
-Overrides at or above `R_MAX_HYDRAULIC / 2` are hard-closed before ordinary
-resistance handling. They contribute zero conductance, are excluded from active
-connected-component detection, and report exactly zero flow.
-
-1. `resistance_override` is used directly when set — this is how pumps,
+1. Overrides at or above `R_MAX_HYDRAULIC / 2` are hard-closed before
+   anything else. They contribute zero conductance, are excluded from active
+   connected-component detection, and report exactly zero flow.
+2. `forced_flow` (active pump edges) bypasses resistance entirely: zero
+   conductance, but the edge injects its fixed flow directly into the
+   right-hand side as a Neumann source/sink pair, so it is exact and
+   correctly-signed regardless of the pressure field. Like a hard-closed
+   edge, it's excluded from connected-component detection — an ideal pump
+   genuinely decouples upstream and downstream absolute pressure.
+3. `resistance_override` is used directly when set otherwise — this is how
    MFCs and BPRs are represented.
-2. Junction edges use the small epsilon resistance `R_JUNCTION`
+4. Junction edges use the small epsilon resistance `R_JUNCTION`
    (nearly lossless, keeps the matrix well-conditioned).
-3. Transport edges use Hagen-Poiseuille resistance
+5. Transport edges use Hagen-Poiseuille resistance
    `R = 128·η·L / (π·D⁴)` with the configured carrier viscosity.
 
 ## Transport
@@ -197,9 +208,19 @@ converted (positive = vessel heats up).
 
 ## Back-Pressure Regulators
 
-The worker pre-resolves BPR edges at construction. Once per step, after the
-hydraulic solve, each BPR edge's resistance override is updated for the next
-tick:
+The worker pre-resolves BPR edges at construction. A BPR is a one-way check
+valve — it relieves pressure upstream to downstream only and must never carry
+flow the other way — so every step, immediately after the hydraulic solve and
+before anything else runs, `Worker._reseat_backward_bpr_edges` force-closes
+(`R_MAX_HYDRAULIC`) any open BPR edge whose solved flow came out negative and
+re-solves, repeating until no open BPR edge is backward. This is what
+guarantees the check-valve invariant: the proportional throttle below treats
+an open BPR as a plain (undirected) resistor, which on its own has no way to
+stop a pressure shift elsewhere in the network from pulling flow backward
+through it.
+
+Once per step, after that guarantee holds, each BPR edge's resistance
+override is updated for the next tick:
 
 - While closed (`R_MAX_HYDRAULIC`), the upstream pressure is genuine: the
   edge stays closed below the setpoint and opens fully once the setpoint is
@@ -207,7 +228,8 @@ tick:
 - While open, a proportional model drives the upstream pressure toward the
   setpoint: `R = (setpoint − P_downstream) / |Q|`. If the downstream
   pressure already exceeds the setpoint, the override is cleared (fully
-  open) and the network settles naturally.
+  open) and the network settles naturally — the reseat guarantee above
+  applies regardless of how this heuristic chooses to throttle.
 
 ## Recorder
 

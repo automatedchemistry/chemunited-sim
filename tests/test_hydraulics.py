@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from chemunited_core.common.constant import ATMOSPHERE_PRESSURE_PA
 from chemunited_core.components.enums import BoundaryConditionKind, InternalEdgeRole
 from chemunited_core.components.internals import PortBoundaryCondition
 
@@ -30,6 +31,7 @@ def _edge(
     destination: str,
     *,
     role: InternalEdgeRole = InternalEdgeRole.TRANSPORT,
+    forced_flow: float | None = None,
 ) -> HydraulicEdge:
     return HydraulicEdge(
         edge_id=edge_id,
@@ -41,6 +43,7 @@ def _edge(
         resistance_override=None,
         component=None,
         is_external=role != InternalEdgeRole.JUNCTION,
+        forced_flow=forced_flow,
     )
 
 
@@ -89,3 +92,64 @@ def test_junction_star_preserves_external_flow_balance():
     external_out = state.flows["j3_to_sink"]
     assert (external_in - external_out) * 1e9 == pytest.approx(0.0, abs=1e-3)
     assert state.flows["j.2.0"] * 1e9 == pytest.approx(50.0, abs=1e-3)
+
+
+def test_forced_flow_edge_holds_exact_flow_against_adverse_pressure_gradient():
+    """Regression test for the HPLCPump backward-flow bug.
+
+    A forced-flow edge (an active Pump's own junction edge) must carry
+    exactly its commanded flow, correctly signed, even on a single cold
+    solve where the surrounding pressure gradient runs the opposite way
+    (downstream pinned *higher* than upstream) -- the exact "pump working
+    against back-pressure" scenario where the old dp/Q resistance-matching
+    iteration could settle on the wrong sign for many ticks.
+    """
+    target_flow = 1.6666666666666667e-8  # 1 mL/min in m3/s
+
+    graph = HydraulicGraph()
+    graph.nodes["upstream"] = _node(
+        "upstream",
+        PortBoundaryCondition(BoundaryConditionKind.PRESSURE, 101_325.0),
+    )
+    graph.nodes["downstream"] = _node(
+        "downstream",
+        PortBoundaryCondition(BoundaryConditionKind.PRESSURE, 500_000.0),
+    )
+    graph.edges["pump.1.2"] = _edge(
+        "pump.1.2",
+        "upstream",
+        "downstream",
+        role=InternalEdgeRole.JUNCTION,
+        forced_flow=target_flow,
+    )
+
+    state = solve(graph)
+
+    assert state.flows["pump.1.2"] == pytest.approx(target_flow)
+
+
+def test_forced_flow_edge_decouples_pressure_of_unconnected_sides():
+    """A forced-flow edge is the *only* link between two otherwise-isolated
+    subnetworks, neither pinned by any other Dirichlet BC. Each side must be
+    anchored to atmosphere independently (mirroring a real pump, which
+    genuinely decouples upstream/downstream absolute pressure), while the
+    edge itself still carries exactly the forced flow.
+    """
+    target_flow = 5.0e-9
+
+    graph = HydraulicGraph()
+    graph.nodes["a.1"] = _node("a.1")
+    graph.nodes["a.2"] = _node("a.2")
+    graph.edges["pump.1.2"] = _edge(
+        "pump.1.2",
+        "a.1",
+        "a.2",
+        role=InternalEdgeRole.JUNCTION,
+        forced_flow=target_flow,
+    )
+
+    state = solve(graph)
+
+    assert state.pressures["a.1"] == pytest.approx(float(ATMOSPHERE_PRESSURE_PA))
+    assert state.pressures["a.2"] == pytest.approx(float(ATMOSPHERE_PRESSURE_PA))
+    assert state.flows["pump.1.2"] == pytest.approx(target_flow)

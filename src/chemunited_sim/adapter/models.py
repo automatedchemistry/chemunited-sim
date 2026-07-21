@@ -68,13 +68,20 @@ class HydraulicEdge:
     Represents an internal component channel (is_external=False) or an
     external physical tube connecting two component ports (is_external=True).
 
-    The hydraulics solver reads role, length, diameter, and resistance_override:
+    The hydraulics solver reads role, length, diameter, resistance_override,
+    and forced_flow:
+        forced_flow is not None     -> ideal flow source: edge conductance is
+                                        0 (excluded from the resistive network)
+                                        and the edge's flow is fixed at
+                                        forced_flow regardless of the pressure
+                                        field on either side.
         role == JUNCTION            -> R = 0 (lossless, geometry ignored)
         resistance_override is not None -> use override directly (Pa*s/m3)
         otherwise                   -> R = (128 * eta * L) / (pi * D^4)
 
     HydraulicEdge is mutable. The worker writes resistance_override in-place
-    for BPR edges each time step and for valve edges after rotor switches.
+    for BPR edges each time step and for valve edges after rotor switches,
+    and writes forced_flow in-place for Pump edges each time step.
 
     Attributes:
         edge_id:             Globally unique identifier.
@@ -89,6 +96,9 @@ class HydraulicEdge:
         resistance_override: None = compute from geometry.
                              float = use directly (Pa*s/m3).
                              R_MAX_HYDRAULIC = hard-closed, zero-conductance channel.
+        forced_flow:         None = flow is solved from resistance as normal.
+                             float = ideal flow source (m3/s); see decision
+                             tree above. Mutually exclusive with a closed edge.
         component:           Owning component name; None for external edges.
         is_external:         True for edges derived from EdgeData (physical tubing).
     """
@@ -103,6 +113,7 @@ class HydraulicEdge:
     component: str | None
     is_external: bool
     content: list[VolumeContentBase] = field(default_factory=list)
+    forced_flow: float | None = None
 
 
 @dataclass

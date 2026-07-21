@@ -88,11 +88,9 @@ class _MfcEntry:
 
 @dataclass
 class _PumpEntry:
-    """Pre-resolved pump edge metadata for fast per-step resistance update."""
+    """Pre-resolved pump edge metadata for fast per-step forced-flow sync."""
 
     comp: PumpData
-    upstream_node_id: str
-    downstream_node_id: str
     edge: HydraulicEdge
 
 
@@ -154,14 +152,7 @@ def _build_pump_entries(
         edge = graph.edges.get(edge_id)
         if edge is None:
             continue
-        entries.append(
-            _PumpEntry(
-                comp=comp,
-                upstream_node_id=f"{comp.name}.1",
-                downstream_node_id=f"{comp.name}.2",
-                edge=edge,
-            )
-        )
+        entries.append(_PumpEntry(comp=comp, edge=edge))
     return entries
 
 
@@ -447,11 +438,18 @@ class Worker:
     :meth:`step` (single time step) and :meth:`run` (full simulation) as the
     primary interface.
 
-    **Pump, BPR and MFC**: after each hydraulic solve, resistance overrides are
-    updated from the solved pressures so the next tick's solve uses correct
-    values.  Pump uses R = dp/Q (negative when working against back-pressure —
-    active element model).  BPR uses a proportional model that drives upstream
-    pressure toward the setpoint.  MFC uses R = dp / setpoint_flow.
+    **Pump, BPR and MFC**: after each hydraulic solve, active-element edge
+    state is refreshed so the next tick's solve uses correct values.  Pump
+    forces flow_rate directly as a hard, pressure-independent flow-source
+    constraint (`forced_flow`) — never derived from resistance, so it can't
+    be pulled backward by back-pressure.  BPR uses a proportional resistance
+    model that drives upstream pressure toward the setpoint; since a plain
+    resistor has no notion of direction, `_reseat_backward_bpr_edges` runs
+    right after the solve to force-close (and re-solve past) any open BPR
+    edge that would otherwise carry flow backward — a BPR is a one-way check
+    valve and must never relieve pressure downstream to upstream.  MFC uses
+    R = dp / setpoint_flow, same as before — it's a controlled variable
+    resistance (like a valve), not a forced-flow source.
 
     Parameters
     ----------
@@ -562,6 +560,37 @@ class Worker:
     # Step interface
     # ------------------------------------------------------------------
 
+    def _reseat_backward_bpr_edges(self, hyd_state: HydraulicState) -> HydraulicState:
+        """Force-close any open BPR edge whose solved flow is backward.
+
+        A BPR is a one-way check valve: it relieves pressure upstream to
+        downstream only, and can never legitimately carry flow the other
+        way. The per-tick resistance model in the loop below treats an open
+        BPR as a plain resistor, which has no notion of direction — if
+        something elsewhere in the network pushes downstream pressure above
+        upstream, Ohm's law alone would happily solve a negative flow.
+
+        This closes the gap directly: after a solve, any open BPR edge with
+        negative flow is reseated (R_MAX_HYDRAULIC) and the network is
+        re-solved, repeating until no open BPR reports negative flow. Each
+        pass can only close edges — never reopen one mid-tick — so this is
+        bounded by ``len(self._bpr_entries)`` iterations and cannot
+        oscillate. Reopening is still governed solely by the existing
+        upstream-pressure-vs-setpoint check on a later tick.
+        """
+        for _ in range(len(self._bpr_entries) + 1):
+            reseated = False
+            for bpr_entry in self._bpr_entries:
+                if bpr_entry.edge.resistance_override == R_MAX_HYDRAULIC:
+                    continue
+                if hyd_state.flows.get(bpr_entry.edge_id, 0.0) < 0.0:
+                    bpr_entry.edge.resistance_override = R_MAX_HYDRAULIC
+                    reseated = True
+            if not reseated:
+                break
+            hyd_state = solve(self._graph, self._config.viscosity)
+        return hyd_state
+
     def step(self) -> None:
         """Execute one operator-splitting time step.
 
@@ -572,15 +601,20 @@ class Worker:
         # 1. Solve hydraulics
         hyd_state = solve(self._graph, self._config.viscosity)
 
-        # 2a. Update pump and MFC resistances from this tick's ΔP for the next solve
+        # 1b. Guarantee no open BPR edge carries backward flow (see
+        # _reseat_backward_bpr_edges docstring).
+        hyd_state = self._reseat_backward_bpr_edges(hyd_state)
+
+        # 2a. Sync pump forced-flow edges and update MFC resistance from this
+        # tick's ΔP for the next solve. Pumps force flow_rate as a hard,
+        # pressure-independent constraint, so they need no ΔP feedback —
+        # this is just a cheap catch-all copy for any caller that mutated
+        # flow_rate without going through adapter.resync_component().
         for pump_entry in self._pump_entries:
-            dp = hyd_state.pressures.get(
-                pump_entry.upstream_node_id, 0.0
-            ) - hyd_state.pressures.get(pump_entry.downstream_node_id, 0.0)
-            pump_entry.comp.update_resistance(dp)
-            pump_entry.edge.resistance_override = pump_entry.comp.internal_edges[
-                (1, 2)
-            ].resistance_override
+            pump_entry.comp.sync_forced_flow()
+            internal_edge = pump_entry.comp.internal_edges[(1, 2)]
+            pump_entry.edge.resistance_override = internal_edge.resistance_override
+            pump_entry.edge.forced_flow = internal_edge.forced_flow_override
 
         for mfc_entry in self._mfc_entries:
             dp = hyd_state.pressures.get(
@@ -591,7 +625,9 @@ class Worker:
                 (1, 2)
             ].resistance_override
 
-        # 2b. Update BPR resistance from this tick's pressure and flow.
+        # 2b. Update BPR resistance from this tick's pressure and flow, to be
+        # used by the next tick's solve (hyd_state here already has the
+        # check-valve guarantee from _reseat_backward_bpr_edges applied).
         # When closed, P_upstream is genuine — use it to decide whether to open.
         # When open, P_upstream = P_downstream (JUNCTION R=0) and cannot be used
         # for the open/close decision.  Instead, compute R = (setpoint − P_down) / Q

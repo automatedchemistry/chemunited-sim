@@ -28,7 +28,8 @@ def resync_component(graph: HydraulicGraph, comp: ComponentData) -> None:
     """Propagate mutable component state into HydraulicGraph.
 
     Called immediately after ComponentData.apply(). Topology is never changed;
-    edge resistance overrides and port boundaries are refreshed in-place.
+    edge resistance overrides, forced-flow overrides, and port boundaries are
+    refreshed in-place.
     """
     for port_number, port in comp.ports_by_number.items():
         node_id = f"{comp.name}.{port_number}"
@@ -41,6 +42,7 @@ def resync_component(graph: HydraulicGraph, comp: ComponentData) -> None:
         hydraulic_edge = graph.edges.get(edge_id)
         if hydraulic_edge is not None:
             hydraulic_edge.resistance_override = internal_edge.resistance_override
+            hydraulic_edge.forced_flow = internal_edge.forced_flow_override
 
 
 def _port_category(

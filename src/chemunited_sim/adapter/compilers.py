@@ -519,6 +519,7 @@ def compile_component(
                 resistance_override=edge.resistance_override,
                 component=comp.name,
                 is_external=False,
+                forced_flow=edge.forced_flow_override,
             )
         )
 

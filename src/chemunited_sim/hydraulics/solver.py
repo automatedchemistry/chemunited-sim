@@ -72,10 +72,20 @@ def solve(
     The solver performs four passes:
 
     1. **Conductance stamping** — builds the sparse nodal admittance matrix
-       *Y* and the right-hand-side vector *Q* by iterating all edges.
+       *Y* and the right-hand-side vector *Q* by iterating all edges. An edge
+       with ``forced_flow`` set (e.g. an active Pump) is not a resistor: it
+       contributes zero conductance and instead injects its forced flow
+       directly into *Q* at both endpoints, exactly like a Neumann boundary
+       condition — this makes the flow exact and independent of the pressure
+       field, so it cannot be pulled backward by back-pressure the way a
+       resistance-matched edge could.
     2. **Component detection** — finds connected subgraphs using
        ``scipy.sparse.csgraph.connected_components`` on the structural
-       adjacency (before any row replacement).
+       adjacency (before any row replacement). Forced-flow edges are
+       excluded here too, so the two sides of an active pump are anchored to
+       atmosphere independently unless tied together some other way — this
+       mirrors reality: an ideal pump genuinely decouples upstream and
+       downstream absolute pressure.
     3. **Boundary conditions** — applies Dirichlet (PRESSURE) BCs via row
        replacement and Neumann (FLOW) BCs via RHS addition.
     4. **Atmospheric anchor** — any connected component that has no
@@ -83,7 +93,8 @@ def solve(
        first node to prevent a singular system.
 
     After ``scipy.sparse.linalg.spsolve``, edge flows are back-computed as
-    ``Q_ij = G_ij · (P_i − P_j)`` (signed: positive = origin → destination).
+    ``Q_ij = G_ij · (P_i − P_j)`` (signed: positive = origin → destination),
+    except forced-flow edges, whose flow is simply their fixed value.
 
     Parameters
     ----------
@@ -128,6 +139,16 @@ def solve(
     for edge_id, edge in edges.items():
         if is_hydraulically_closed(edge):
             edge_conductances[edge_id] = 0.0
+            continue
+
+        if edge.forced_flow is not None:
+            # Ideal flow source: no conductance of its own — inject the
+            # forced flow directly as a Neumann source/sink pair instead.
+            edge_conductances[edge_id] = 0.0
+            i = node_idx[edge.origin_node_id]
+            j = node_idx[edge.destination_node_id]
+            Q[i] -= edge.forced_flow
+            Q[j] += edge.forced_flow
             continue
 
         R = _compute_resistance(edge, viscosity)
@@ -205,10 +226,14 @@ def solve(
     pressures: dict[str, float] = {node_ids[i]: float(P[i]) for i in range(n)}
 
     # ------------------------------------------------------------------
-    # Back-compute signed edge flows: Q_ij = G_ij · (P_i − P_j)
+    # Back-compute signed edge flows: Q_ij = G_ij · (P_i − P_j),
+    # except ideal flow sources, whose flow is fixed by construction.
     # ------------------------------------------------------------------
     flows: dict[str, float] = {}
     for edge_id, edge in edges.items():
+        if edge.forced_flow is not None:
+            flows[edge_id] = edge.forced_flow
+            continue
         G = edge_conductances[edge_id]
         i = node_idx[edge.origin_node_id]
         j = node_idx[edge.destination_node_id]
