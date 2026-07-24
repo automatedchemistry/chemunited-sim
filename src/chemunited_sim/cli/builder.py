@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from chemunited_core.common.enums import ConnectionType, PhaseKind
 from chemunited_core.components import ComponentData, NeutralComponentData
+from chemunited_core.components.internals import DEFAULT_INVENTORY_KEY
 from chemunited_core.compounds import COMPOUNDS, ChemicalEntity
 from chemunited_core.connections.edge import EdgeData, EdgeMode
 from chemunited_core.figure_registry import COMPONENTS
+from chemunited_core.figure_registry.vessels import FlowReactorData
 from chemunited_quantities import ChemUnitQuantity
 from loguru import logger
 
@@ -122,7 +124,18 @@ class PlatformBuilder:
                 f"Unknown reaction_type '{reaction_type}'. "
                 "Only 'FirstOrderDecay' is supported."
             )
-        node_id = f"{target}.Inventory"
+        component = self._components.get(target)
+        if component is None:
+            raise ValueError(f"Unknown reaction target '{target}'")
+        if isinstance(component, FlowReactorData):
+            target_id = f"{target}.1.2"
+        elif DEFAULT_INVENTORY_KEY in component.internal_inventories:
+            target_id = f"{target}.{DEFAULT_INVENTORY_KEY}"
+        else:
+            raise ValueError(
+                f"Component '{target}' does not support reactions. "
+                "Expected a vessel inventory or FlowReactor."
+            )
         phase_kind = PhaseKind(phase.lower()) if isinstance(phase, str) else phase
         reaction = FirstOrderDecay(
             reactant=reactant,
@@ -131,7 +144,7 @@ class PlatformBuilder:
             phase=phase_kind,
             delta_temperature_per_mol_converted=delta_temperature_per_mol_converted,
         )
-        self._reactions_map.setdefault(node_id, []).append(reaction)
+        self._reactions_map.setdefault(target_id, []).append(reaction)
         logger.debug(
             "Reaction added | target='{}' type='{}' reactant='{}' -> product='{}'",
             target,

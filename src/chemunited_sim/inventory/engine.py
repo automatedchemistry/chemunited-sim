@@ -9,6 +9,7 @@ transport edge, using the port-access mapping to select the preferred phase.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from chemunited_core.common.enums import PhaseKind
@@ -77,8 +78,10 @@ def apply_heat_exchange(
 ) -> None:
     """Apply Newton's law of cooling for each vessel with heat exchange enabled.
 
-    Q_dot = U · A · (T_wall − T_vessel)
-    ΔT    = Q_dot · dt / C_thermal
+    Uses the exact closed-form solution of dT/dt = U·A/C·(T_wall − T) over
+    one timestep, rather than a forward-Euler step — unconditionally stable
+    for any positive thermal mass, however small, and relaxes toward
+    ``T_wall`` instead of diverging (mirrors ``transport.engine._heat_pocket``).
 
     Skips vessels with zero tracked-species thermal mass to avoid
     divide-by-zero (matches the fallback logic in ``assimilate``).
@@ -93,8 +96,10 @@ def apply_heat_exchange(
         ) + _thermal_mass(state.gas_species_moles, PhaseKind.GAS)
         if c_thermal <= 0.0:
             continue
-        q_dot = entry.U * entry.contact_area * (entry.T_wall - state.temperature)
-        state.temperature += q_dot * dt / c_thermal
+        exponent = -(entry.U * entry.contact_area * dt / c_thermal)
+        state.temperature = entry.T_wall + (
+            state.temperature - entry.T_wall
+        ) * math.exp(exponent)
 
 
 def assimilate(
@@ -191,6 +196,13 @@ def assimilate(
                 arrival_state.temperature = (
                     c_before * arrival_state.temperature + h_arriving
                 ) / total_c
+            elif total_c != total_c:  # NaN: corrupted upstream state, not "no species"
+                logger.error(
+                    "Vessel {} has a non-finite thermal mass (NaN) - state is "
+                    "corrupted upstream; falling back to volume-weighted "
+                    "temperature blend, which will also be invalid.",
+                    inv_node_id,
+                )
             else:
                 logger.warning(
                     "No tracked species in vessel {} or arriving pockets - "

@@ -206,6 +206,10 @@ include `NullReaction`, `FirstOrderDecay`, and `StoichiometricReaction`.
 Both kinetic models support an optional temperature change per mole
 converted (positive = vessel heats up).
 
+Inventory targets react after assimilation. FlowReactor and PhotoReactor
+targets react every resident pocket after wall heat exchange and before
+transport advances; pocket volume and pressure remain unchanged.
+
 ## Back-Pressure Regulators
 
 The worker pre-resolves BPR edges at construction. A BPR is a one-way check

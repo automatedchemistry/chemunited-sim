@@ -13,10 +13,11 @@ Covers:
 from __future__ import annotations
 
 import sqlite3
+from collections import deque
 
 import pytest
 from chemunited_core.common.constant import R_MAX_HYDRAULIC
-from chemunited_core.common.enums import ConnectionType
+from chemunited_core.common.enums import ConnectionType, PhaseKind
 from chemunited_core.components import (
     BackPressureRegulatorData,
     BackPressureRegulatorMode,
@@ -30,7 +31,9 @@ from chemunited_core.figure_registry import COMPONENTS
 from chemunited_quantities import ChemUnitQuantity
 
 from chemunited_sim.adapter import compile_graph, resync_component
+from chemunited_sim.reactions import FirstOrderDecay
 from chemunited_sim.recorder import Recorder
+from chemunited_sim.transport.models import Pocket
 from chemunited_sim.worker import SimConfig, Worker
 
 # ---------------------------------------------------------------------------
@@ -247,6 +250,38 @@ def test_worker_initial_transport_state_has_queues():
     w = Worker(graph, components, SimConfig(dt=0.1, t_end=1.0))
     # At least one TRANSPORT edge should have a queue
     assert len(w.transport_state.edge_queues) > 0
+
+
+def test_worker_reacts_resident_transport_pockets_before_advance():
+    graph, components = _make_tube_platform(src_bar=1.0, snk_bar=1.0)
+    reaction = FirstOrderDecay(
+        reactant="a",
+        product="b",
+        rate_constant=0.5,
+        phase=PhaseKind.LIQUID,
+    )
+    worker = Worker(
+        graph,
+        components,
+        SimConfig(dt=1.0, t_end=1.0),
+        reactions_map={"tube.1.2": [reaction]},
+    )
+    worker.transport_state.edge_queues["tube.1.2"] = deque(
+        [
+            Pocket(
+                phase_kind=PhaseKind.LIQUID,
+                volume=1.0e-6,
+                species_moles={"a": 1.0},
+                temperature=298.0,
+                pressure=101_325.0,
+            )
+        ]
+    )
+
+    worker.step()
+
+    pocket = worker.transport_state.edge_queues["tube.1.2"][0]
+    assert pocket.species_moles == pytest.approx({"a": 0.5, "b": 0.5})
 
 
 # ---------------------------------------------------------------------------

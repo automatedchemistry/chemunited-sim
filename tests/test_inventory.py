@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 from chemunited_core.common.enums import ConnectionType, PhaseKind
 from chemunited_core.components.enums import PortAccess
+from chemunited_core.compounds import COMPOUNDS
 from chemunited_core.compounds.entity import IDEAL_GAS_CONSTANT
 from chemunited_core.connections import EdgeData, EdgeMode
 from chemunited_core.figure_registry import COMPONENTS
 
 from chemunited_sim.adapter import compile_graph
 from chemunited_sim.hydraulics.models import HydraulicState
-from chemunited_sim.inventory.engine import assimilate, emit
+from chemunited_sim.inventory.engine import (
+    HeatExchangeEntry,
+    apply_heat_exchange,
+    assimilate,
+    emit,
+)
 from chemunited_sim.inventory.models import InventoryState
 from chemunited_sim.inventory.port_map import EdgePortAccess, build_port_map
 from chemunited_sim.transport.models import Pocket
@@ -231,3 +239,63 @@ def test_autosampler_transport_edge_emits_liquid_from_selected_vial():
     assert pocket.species_moles == {"HeavyWater": pytest.approx(1.0e-3)}
     assert state.liq_volume == pytest.approx(9.99e-7)
     assert state.liq_species_moles["HeavyWater"] == pytest.approx(0.999)
+
+
+def test_apply_heat_exchange_matches_closed_form_solution():
+    state = InventoryState(
+        node_id="vessel.Inventory",
+        capacity=1.0e-6,
+        pressure=101_325.0,
+        temperature=298.15,
+        liq_volume=5.0e-7,
+        gas_volume=5.0e-7,
+        liq_species_moles={},
+        gas_species_moles={"air": 1.0e-2},
+    )
+    entry = HeatExchangeEntry(
+        inv_node_id="vessel.Inventory",
+        U=50.0,
+        contact_area=0.01,
+        T_wall=313.15,
+    )
+
+    apply_heat_exchange({"vessel.Inventory": state}, [entry], dt=2.0)
+
+    c_thermal = (
+        state.gas_species_moles["air"]
+        * COMPOUNDS["air"].cp("gas").to_base_units().magnitude
+    )
+    expected = entry.T_wall + (298.15 - entry.T_wall) * math.exp(
+        -(entry.U * entry.contact_area * 2.0) / c_thermal
+    )
+    assert state.temperature == pytest.approx(expected)
+
+
+def test_apply_heat_exchange_remains_stable_for_near_zero_thermal_mass():
+    """Regression test: a forward-Euler update diverges to +/-inf and NaN for a
+    vanishingly small but nonzero thermal mass; the closed-form update must stay
+    bounded between the initial temperature and the wall temperature instead.
+    """
+    state = InventoryState(
+        node_id="vessel.Inventory",
+        capacity=1.0e-6,
+        pressure=101_325.0,
+        temperature=298.15,
+        liq_volume=5.0e-7,
+        gas_volume=5.0e-7,
+        liq_species_moles={},
+        gas_species_moles={"air": 1.0e-10},
+    )
+    entry = HeatExchangeEntry(
+        inv_node_id="vessel.Inventory",
+        U=50.0,
+        contact_area=0.01,
+        T_wall=313.15,
+    )
+
+    for _ in range(20):
+        apply_heat_exchange({"vessel.Inventory": state}, [entry], dt=2.0)
+        assert math.isfinite(state.temperature)
+        assert 298.15 <= state.temperature <= 313.15
+
+    assert state.temperature == pytest.approx(313.15, abs=1e-6)

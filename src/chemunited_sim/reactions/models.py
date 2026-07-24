@@ -4,7 +4,7 @@
 ``NullReaction``         — no-op, safe default for nodes without chemistry.
 ``FirstOrderDecay``      — irreversible A → B with first-order kinetics.
 ``StoichiometricReaction`` — generalised multi-species conversion.
-``ReactionsMap``         — type alias for the per-node reaction registry.
+``ReactionsMap``         — registry keyed by inventory node or transport edge.
 """
 
 from __future__ import annotations
@@ -33,7 +33,23 @@ class Reaction(Protocol):
         ...
 
 
-# Type alias for the per-node reaction registry passed to apply().
+@runtime_checkable
+class PhaseReaction(Protocol):
+    """Reaction that can also operate on one transported fluid phase."""
+
+    phase: PhaseKind
+
+    def step_phase(
+        self,
+        species_moles: dict[str, float],
+        temperature: float,
+        dt: float,
+    ) -> float:
+        """Mutate phase composition and return its updated temperature."""
+        ...
+
+
+# Type alias for reactions keyed by inventory-node ID or transport-edge ID.
 ReactionsMap = dict[str, list[Reaction]]
 
 
@@ -100,17 +116,27 @@ class FirstOrderDecay:
             if self.phase == PhaseKind.LIQUID
             else state.gas_species_moles
         )
+        state.temperature = self.step_phase(species, state.temperature, dt)
+
+    def step_phase(
+        self,
+        species_moles: dict[str, float],
+        temperature: float,
+        dt: float,
+    ) -> float:
+        """Apply the kinetic update to one phase composition."""
+        species = species_moles
         n_A = species.get(self.reactant, 0.0)
         if n_A < MIN_REACTION_MOLES:
-            return
+            return temperature
 
         delta_n = min(self.rate_constant * n_A * dt, n_A)
         if delta_n < MIN_REACTION_MOLES:
-            return
+            return temperature
 
         species[self.reactant] = n_A - delta_n
         species[self.product] = species.get(self.product, 0.0) + delta_n
-        state.temperature += self.delta_temperature_per_mol_converted * delta_n
+        return temperature + self.delta_temperature_per_mol_converted * delta_n
 
 
 @dataclass
@@ -168,26 +194,36 @@ class StoichiometricReaction:
             if self.phase == PhaseKind.LIQUID
             else state.gas_species_moles
         )
+        state.temperature = self.step_phase(species, state.temperature, dt)
+
+    def step_phase(
+        self,
+        species_moles: dict[str, float],
+        temperature: float,
+        dt: float,
+    ) -> float:
+        """Apply the stoichiometric update to one phase composition."""
+        species = species_moles
 
         n_ctrl = species.get(self.controlling_species, 0.0)
         if n_ctrl < MIN_REACTION_MOLES:
-            return
+            return temperature
 
         # Maximum extent limited by available moles of every reactant
         dxi_max = float("inf")
         for sp, coeff in self.reactants.items():
             n = species.get(sp, 0.0)
             if n < MIN_REACTION_MOLES:
-                return  # any reactant absent → no reaction this step
+                return temperature  # any reactant absent → no reaction this step
             dxi_max = min(dxi_max, n / coeff)
 
         dxi = min(self.rate_constant * n_ctrl * dt, dxi_max)
         if dxi < MIN_REACTION_MOLES:
-            return
+            return temperature
 
         for sp, coeff in self.reactants.items():
             species[sp] = max(species.get(sp, 0.0) - coeff * dxi, 0.0)
         for sp, coeff in self.products.items():
             species[sp] = species.get(sp, 0.0) + coeff * dxi
 
-        state.temperature += self.delta_temperature_per_mol_converted * dxi
+        return temperature + self.delta_temperature_per_mol_converted * dxi

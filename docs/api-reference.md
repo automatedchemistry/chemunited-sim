@@ -95,21 +95,25 @@ from chemunited_sim.inventory import (
 from chemunited_sim.reactions import (
     FirstOrderDecay,
     NullReaction,
+    PhaseReaction,
     Reaction,
     ReactionsMap,
     StoichiometricReaction,
     apply,
+    apply_transport,
 )
 ```
 
 | Name | Purpose |
 |---|---|
 | `Reaction` | Protocol for objects with `step(state, dt) -> None` |
-| `ReactionsMap` | `{inventory_node_id: list[Reaction]}` |
+| `PhaseReaction` | Protocol for reactions that can update one transported fluid phase |
+| `ReactionsMap` | Reactions keyed by inventory-node ID or transport-edge ID |
 | `NullReaction` | No-op reaction |
 | `FirstOrderDecay` | Irreversible first-order `A -> B` reaction in one phase |
 | `StoichiometricReaction` | Multi-species stoichiometric reaction driven by one controlling species |
 | `apply(states, reactions_map, dt)` | Apply all reactions to matching inventory states |
+| `apply_transport(state, reactions_map, dt)` | Apply all reactions to resident pockets on matching transport edges |
 
 Example:
 
@@ -128,6 +132,11 @@ reactions_map = {
     ]
 }
 ```
+
+PlatformBuilder.add_reaction accepts semantic component names. Vessel targets
+resolve to the component's Inventory node. FlowReactor and PhotoReactor
+targets resolve to their internal 1-to-2 transport edge, where every resident
+pocket reacts once per simulation step before transport advances.
 
 ## `chemunited_sim.recorder`
 

@@ -47,7 +47,7 @@ from ..inventory.initialiser import build_inventory_states
 from ..inventory.models import InventoryState
 from ..inventory.port_map import PortAccessMap, build_port_map
 from ..inventory.source_map import SourceMap, build_source_map
-from ..reactions.engine import apply
+from ..reactions.engine import apply, apply_transport
 from ..reactions.models import ReactionsMap
 from ..recorder.writer import Recorder
 from ..transport.engine import (
@@ -460,8 +460,8 @@ class Worker:
     config:
         Time-stepping and solver parameters.
     reactions_map:
-        ``{inv_node_id: [Reaction, ...]}`` — optional reaction network.
-        Defaults to an empty map (no reactions).
+        Reactions keyed by inventory-node ID or transport-edge ID. Defaults
+        to an empty map (no reactions).
     recorder:
         Optional :class:`~chemunited_sim.recorder.Recorder` instance.
         When provided, :meth:`run` closes it after the last step.
@@ -672,6 +672,13 @@ class Worker:
                 transport_heat_entries,
                 self._config.dt,
             )
+
+        # Apply plug-flow reactions while pockets are resident in the reactor.
+        apply_transport(
+            self._transport_state,
+            self._reactions_map,
+            self._config.dt,
+        )
 
         # 5. Advance transport
         result = advance(self._graph, hyd_state, self._transport_state, self._config.dt)

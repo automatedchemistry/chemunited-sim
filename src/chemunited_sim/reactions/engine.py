@@ -6,8 +6,11 @@ method against the corresponding :class:`~chemunited_sim.inventory.InventoryStat
 
 from __future__ import annotations
 
+from collections import deque
+
 from ..inventory.models import InventoryState
-from .models import ReactionsMap
+from ..transport.models import Pocket, TransportState
+from .models import PhaseReaction, ReactionsMap
 
 
 def apply(
@@ -45,3 +48,43 @@ def apply(
             continue
         for reaction in reactions:
             reaction.step(state, dt)
+
+
+def apply_transport(
+    state: TransportState,
+    reactions_map: ReactionsMap,
+    dt: float,
+) -> None:
+    """Apply reactions to every resident pocket on targeted transport edges."""
+    for edge_id, reactions in reactions_map.items():
+        queue = state.edge_queues.get(edge_id)
+        if not queue:
+            continue
+
+        reacted: deque[Pocket] = deque()
+        for pocket in queue:
+            species_moles = dict(pocket.species_moles)
+            temperature = pocket.temperature
+            for reaction in reactions:
+                if not isinstance(reaction, PhaseReaction):
+                    raise TypeError(
+                        f"Reaction {type(reaction).__name__} cannot target "
+                        "a transport edge."
+                    )
+                if reaction.phase != pocket.phase_kind:
+                    continue
+                temperature = reaction.step_phase(
+                    species_moles,
+                    temperature,
+                    dt,
+                )
+            reacted.append(
+                Pocket(
+                    phase_kind=pocket.phase_kind,
+                    volume=pocket.volume,
+                    species_moles=species_moles,
+                    temperature=temperature,
+                    pressure=pocket.pressure,
+                )
+            )
+        state.edge_queues[edge_id] = reacted
