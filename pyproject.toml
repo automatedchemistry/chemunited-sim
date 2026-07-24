@@ -73,3 +73,8 @@ show_error_codes = true
 
 [tool.coverage.run]
 source = ["src/chemunited_sim"]
+
+[tool.bandit]
+# B101 (assert_used): style nit, not a vulnerability check — we use asserts as
+# internal invariants after a preceding guard already rules out the failing case.
+skips = ["B101"]
