@@ -530,8 +530,8 @@ def post_simulation_start(req: StartSimRequest) -> dict:
             raise HTTPException(422, str(exc))
 
         sim_platform = Platform(
-            {  # type: ignore[arg-type]
-                name: SimClient(
+            {
+                name: SimClient(  # type: ignore[misc]
                     name, comp, state.clock, state.cmd_queue, project.project_path
                 )
                 for name, comp in project.components.items()

@@ -94,7 +94,10 @@ def write_pool_log(
 
 
 class SimClient:
-    """Satisfies ComponentClientProtocol for mode 1 (workflow) simulation.
+    """Duck-types chemunited_workflow.clients.ComponentClient for mode 1 (workflow)
+    simulation, without inheriting from it - it stands in for a real HTTP
+    device client, not one, so Platform's type-checking is silenced at the
+    call site instead (see server.py).
 
     put() calls apply() immediately (setting component state on the workflow
     thread), enqueues a pre-applied SimCommand so the worker resyncs the graph,
