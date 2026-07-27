@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import queue
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
+from fastapi import FastAPI
 
 from ..worker.config import SimConfig
 from . import server as _server_module
@@ -46,7 +48,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run with a system tray icon; use its Quit item to stop the "
         "server (default: blocking terminal mode, Ctrl+C to stop).",
     )
+    parser.add_argument(
+        "--with-mcp",
+        action="store_true",
+        help="Mount an MCP (Model Context Protocol) streamable-HTTP endpoint "
+        "at /mcp on the same host/port, so an LLM agent can drive the "
+        "server directly. See docs/mcp-tools.md.",
+    )
     return parser
+
+
+def _mount_mcp(app: FastAPI, *, host: str, port: int) -> None:
+    """Mount the MCP server onto *app* at ``/mcp`` and wire its session
+    manager into the app's lifespan.
+
+    Must be called before the app is handed to uvicorn (directly or via
+    ``run_with_tray``) — the session manager only starts/stops around the
+    ASGI lifespan.
+    """
+    from ..mcp import create_mcp_server
+
+    mcp_server = create_mcp_server(host=host, port=port, streamable_http_path="/")
+    mcp_sub_app = mcp_server.streamable_http_app()
+    app.mount("/mcp", mcp_sub_app)
+
+    original_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def _lifespan_with_mcp(app: FastAPI):
+        async with mcp_server.session_manager.run():
+            async with original_lifespan(app):
+                yield
+
+    app.router.lifespan_context = _lifespan_with_mcp
 
 
 def main() -> None:
@@ -71,6 +105,9 @@ def main() -> None:
 
     if args.project is not None:
         _do_load_project(args.project.resolve(), state)
+
+    if args.with_mcp:
+        _mount_mcp(app, host="127.0.0.1", port=args.port)
 
     if args.tray:
         from .tray import run_with_tray

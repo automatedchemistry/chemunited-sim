@@ -33,7 +33,7 @@ through `pyproject.toml`.
 ## Simulation server
 
 ```powershell
-chemunited-sim [project] [--port 1472] [--db ./simulations/]
+chemunited-sim [project] [--port 1472] [--db ./simulations/] [--with-mcp]
 ```
 
 Starts a FastAPI server at `http://localhost:<port>`.  OpenAPI docs at
@@ -44,6 +44,7 @@ Starts a FastAPI server at `http://localhost:<port>`.  OpenAPI docs at
 | `project` | — | Path to a project folder or `.chemunited` ZIP. Omit to start in `NO_PROJECT` state. |
 | `--port` | `1472` | Listening port |
 | `--db` | `./simulations/` | Directory where `.db` files are written |
+| `--with-mcp` | off | Mount an MCP endpoint at `/mcp` on the same host/port — see [docs/mcp-tools.md](docs/mcp-tools.md) |
 
 ### REST API
 
@@ -60,6 +61,16 @@ Starts a FastAPI server at `http://localhost:<port>`.  OpenAPI docs at
 
 Open `http://127.0.0.1:1472/simulation/visualization` in a browser to inspect
 the latest available simulation snapshot.
+
+### MCP server
+
+Pass `--with-mcp` to also mount a streamable-HTTP MCP endpoint at `/mcp` on
+the same host/port, so an LLM agent can load a project, run a simulation, and
+pull back structured pressure/temperature/flow/content results to judge
+whether a process is feasible — without needing the REST API or the raw
+`.db` file. No authentication (local-only, matching the REST API's
+`127.0.0.1` default). See [docs/mcp-tools.md](docs/mcp-tools.md) for the full
+tool reference.
 
 ### Server state machine
 
@@ -112,6 +123,7 @@ See [docs/quickstart.md](docs/quickstart.md) for a complete runnable example.
 | [docs/api-reference.md](docs/api-reference.md) | Public import paths and API summary |
 | [docs/recording.md](docs/recording.md) | SQLite recorder schema and usage |
 | [docs/examples.md](docs/examples.md) | Existing examples and what they demonstrate |
+| [docs/mcp-tools.md](docs/mcp-tools.md) | MCP server tool reference for LLM agents |
 
 ## Development
 

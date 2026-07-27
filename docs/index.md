@@ -26,6 +26,7 @@ At a high level, the package provides:
 - [API Reference](api-reference.md): public imports and common call patterns.
 - [Recording](recording.md): SQLite output schema and recorder usage.
 - [Examples](examples.md): the included full-platform demonstration.
+- [MCP Tools](mcp-tools.md): drive the simulation server from an LLM agent.
 
 ## Core Conventions
 
