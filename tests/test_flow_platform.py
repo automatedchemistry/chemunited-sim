@@ -7,13 +7,22 @@ test_visualization.py.
 
 from __future__ import annotations
 
+import json
 import queue
 import shutil
 import time
 from pathlib import Path
 
+import networkx as nx
 import pytest
+from chemunited_workflow import (
+    NodeExecutionContext,
+    Process,
+    WorkflowEdgeSpec,
+    WorkflowNodeSpec,
+)
 from fastapi.testclient import TestClient
+from pydantic import BaseModel, ConfigDict
 
 from chemunited_sim.cli import server
 from chemunited_sim.cli.clock import SimClock
@@ -30,6 +39,47 @@ REQUIRED_COMPONENTS = {
     "divertvalve",
     "mfc",
 }
+
+
+class _FinitePumpConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+
+class _FinitePumpProcess(Process[_FinitePumpConfig]):
+    def build_workflow(self) -> nx.DiGraph:
+        graph = nx.DiGraph()
+        for node_id, method in (
+            ("start", "start"),
+            ("pump", "pump"),
+            ("end", "finish"),
+        ):
+            graph.add_node(
+                node_id,
+                **WorkflowNodeSpec(node_id=node_id, method=method).model_dump(
+                    exclude_none=True
+                ),
+            )
+        graph.add_edge(
+            "start",
+            "pump",
+            **WorkflowEdgeSpec(condition=True).model_dump(exclude_none=True),
+        )
+        graph.add_edge(
+            "pump",
+            "end",
+            **WorkflowEdgeSpec(condition=True).model_dump(exclude_none=True),
+        )
+        return graph
+
+    def start(self, _ctx: NodeExecutionContext) -> bool:
+        return True
+
+    def pump(self, _ctx: NodeExecutionContext) -> bool:
+        self.platform["pump"].put("infuse", rate="1 ml/min", volume="1 ml")
+        return True
+
+    def finish(self, _ctx: NodeExecutionContext) -> bool:
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +288,34 @@ def test_mode1_runs_to_end(loaded_client):
         loaded_client, timeout=30.0
     ), "simulation did not reach idle"
     assert loaded_client.get("/status").json()["sim_status"] == "idle"
+
+
+def test_mode1_waits_for_inferred_pump_completion(loaded_client, workspace_tmp):
+    state = server.get_state()
+    assert state.project is not None
+    state.project.processes["finite_pump"] = _FinitePumpProcess
+    state.project.configs["finite_pump"] = _FinitePumpConfig
+    historical_file = workspace_tmp / "finite_pump.json"
+    historical_file.write_text(
+        json.dumps({"main_parameter": {}, "finite_pump_0": {}}),
+        encoding="utf-8",
+    )
+
+    resp = loaded_client.post(
+        "/simulation/start",
+        json={
+            "execution_id": "finite_pump",
+            "dt": 0.5,
+            "t_end": None,
+            "real_time": False,
+            "historical_file": str(historical_file.resolve()),
+        },
+    )
+
+    assert resp.status_code == 200
+    assert _wait_until_idle(loaded_client, timeout=30.0)
+    assert state.current_t >= 60.0
+    assert state.project.components["pump"].flow_rate_si == 0.0
 
 
 def test_simulation_db_after_run(loaded_client):

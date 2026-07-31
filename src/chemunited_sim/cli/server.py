@@ -534,7 +534,12 @@ def post_simulation_start(req: StartSimRequest) -> dict:
         sim_platform = SimPlatform(
             {
                 name: SimClient(  # type: ignore[misc]
-                    name, comp, state.clock, state.cmd_queue, project.project_path
+                    name,
+                    comp,
+                    state.clock,
+                    state.cmd_queue,
+                    project.project_path,
+                    state._stop_event,
                 )
                 for name, comp in project.components.items()
             },

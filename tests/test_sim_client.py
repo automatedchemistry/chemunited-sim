@@ -11,9 +11,15 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import queue
+import threading
+import time
 
+from chemunited_core.components import PutResult, ScheduledCommand
+from chemunited_core.figure_registry import COMPONENTS
 from chemunited_core.figure_registry.rotary_valve import RotaryValveData
+from chemunited_workflow import RunCancelledError
 
 from chemunited_sim.cli.clock import SimClock
 from chemunited_sim.cli.sim_client import SimClient, iter_apply_kwargs
@@ -94,3 +100,177 @@ class TestSimClientPutPositionCommand:
         log_path = tmp_path / "log" / "pool" / "Valve1.jsonl"
         assert log_path.exists()
         assert '"connect": "[[0, 2]]"' in log_path.read_text(encoding="utf-8")
+
+
+def _wait_until(predicate, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.001)
+    return predicate()
+
+
+def _component(figure: str, name: str):
+    data_class, mode_class = COMPONENTS[figure]
+    return data_class.from_mode(mode_class(name=name))
+
+
+class TestSimClientCommandCompletion:
+    def _client(self, tmp_path, component, clock, cmd_queue, stop_event) -> SimClient:
+        return SimClient(
+            name=component.name,
+            component=component,
+            clock=clock,
+            cmd_queue=cmd_queue,
+            project_path=tmp_path,
+            stop_event=stop_event,
+        )
+
+    def test_finite_pump_put_waits_for_inferred_stop(self, tmp_path):
+        pump = _component("HPLCPump", "Pump1")
+        clock = SimClock()
+        cmd_queue = queue.Queue()
+        stop_event = threading.Event()
+        client = self._client(tmp_path, pump, clock, cmd_queue, stop_event)
+        errors = []
+
+        def run_command() -> None:
+            try:
+                client.put("infuse", rate="1 ml/min", volume="1 ml")
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        thread = threading.Thread(target=run_command)
+        thread.start()
+
+        assert _wait_until(lambda: pump.flow_rate_si > 0.0)
+        assert thread.is_alive()
+        clock.advance(59.0)
+        time.sleep(0.01)
+        assert thread.is_alive()
+
+        clock.advance(2.0)
+        thread.join(timeout=1.0)
+
+        assert not thread.is_alive()
+        assert errors == []
+        assert pump.flow_rate_si == 0.0
+        queued = [cmd_queue.get_nowait(), cmd_queue.get_nowait()]
+        assert [command.command for command in queued] == ["infuse", "stop"]
+        assert all(command.pre_applied for command in queued)
+
+    def test_continuous_pump_returns_until_explicit_stop(self, tmp_path):
+        pump = _component("HPLCPump", "Pump1")
+        clock = SimClock()
+        cmd_queue = queue.Queue()
+        stop_event = threading.Event()
+        client = self._client(tmp_path, pump, clock, cmd_queue, stop_event)
+
+        client.put("infuse", rate="1 ml/min")
+
+        assert pump.flow_rate_si > 0.0
+        assert cmd_queue.qsize() == 1
+
+        client.put("stop")
+
+        assert pump.flow_rate_si == 0.0
+        assert cmd_queue.qsize() == 2
+
+    def test_legacy_wait_is_a_minimum_and_not_a_physics_kwarg(self, tmp_path):
+        valve = RotaryValveData(name="Valve1")
+        clock = SimClock()
+        cmd_queue = queue.Queue()
+        stop_event = threading.Event()
+        client = self._client(tmp_path, valve, clock, cmd_queue, stop_event)
+
+        thread = threading.Thread(
+            target=client.put,
+            args=("position",),
+            kwargs={
+                "connect": "[[0, 2]]",
+                "wait_time": 5.0,
+                "wait_feedback_status": True,
+                "feedback_status_command": "is-idle",
+                "feedback_answer": "true",
+            },
+        )
+        thread.start()
+
+        assert _wait_until(lambda: cmd_queue.qsize() == 1)
+        clock.advance(4.0)
+        time.sleep(0.01)
+        assert thread.is_alive()
+        clock.advance(2.0)
+        thread.join(timeout=1.0)
+
+        assert not thread.is_alive()
+        command = cmd_queue.get_nowait()
+        assert command.kwargs == {"connect": "[[0, 2]]"}
+        log_path = tmp_path / "log" / "pool" / "Valve1.jsonl"
+        entry = json.loads(log_path.read_text(encoding="utf-8"))
+        assert entry["params"] == {"connect": "[[0, 2]]"}
+
+    def test_stop_event_interrupts_inferred_wait(self, tmp_path):
+        pump = _component("HPLCPump", "Pump1")
+        clock = SimClock()
+        cmd_queue = queue.Queue()
+        stop_event = threading.Event()
+        client = self._client(tmp_path, pump, clock, cmd_queue, stop_event)
+        errors = []
+
+        def run_command() -> None:
+            try:
+                client.put("infuse", rate="1 ml/min", volume="1 ml")
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=run_command)
+        thread.start()
+        assert _wait_until(lambda: thread.is_alive() and pump.flow_rate_si > 0.0)
+
+        stop_event.set()
+        thread.join(timeout=1.0)
+
+        assert not thread.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], RunCancelledError)
+
+    def test_multiple_follow_ups_run_in_due_time_order(self, tmp_path):
+        calls = []
+
+        class ScheduledComponent:
+            name = "Scheduled1"
+
+            def apply(self, command, **kwargs):
+                calls.append(command)
+                if command == "start":
+                    return PutResult(
+                        scheduled=[
+                            ScheduledCommand(dt=10.0, command="late"),
+                            ScheduledCommand(dt=5.0, command="early"),
+                        ]
+                    )
+                return PutResult()
+
+            def get(self, command, **kwargs):
+                return None
+
+        clock = SimClock()
+        cmd_queue = queue.Queue()
+        stop_event = threading.Event()
+        client = self._client(
+            tmp_path, ScheduledComponent(), clock, cmd_queue, stop_event
+        )
+        thread = threading.Thread(target=client.put, args=("start",))
+        thread.start()
+
+        assert _wait_until(lambda: calls == ["start"])
+        clock.advance(5.0)
+        assert _wait_until(lambda: calls == ["start", "early"])
+        assert thread.is_alive()
+        clock.advance(5.0)
+        thread.join(timeout=1.0)
+
+        assert not thread.is_alive()
+        assert calls == ["start", "early", "late"]

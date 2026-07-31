@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from itertools import count
 from pathlib import Path
 from typing import Any, Iterator, cast
 
@@ -23,6 +25,20 @@ class SimCommand:
     command: str
     kwargs: dict = field(default_factory=dict)
     pre_applied: bool = False
+
+
+def _wait_until_sim_time(
+    clock: SimClock,
+    deadline: float,
+    stop_event: threading.Event,
+) -> None:
+    """Wait until the simulated deadline, aborting on simulation stop."""
+    while clock.now() < deadline:
+        if stop_event.is_set():
+            raise RunCancelledError("Run was cancelled.")
+        time.sleep(0.0001)
+    if stop_event.is_set():
+        raise RunCancelledError("Run was cancelled.")
 
 
 def _normalize_connect_pairs(parsed: object) -> list[tuple[int, int]] | None:
@@ -95,8 +111,10 @@ class SimClient:
 
     put() calls apply() immediately (setting component state on the workflow
     thread), enqueues a pre-applied SimCommand so the worker resyncs the graph,
-    and spawns a daemon thread for each scheduled follow-up (e.g. auto-stop
-    after a volume dispense). get() delegates directly to ComponentData.get().
+    and waits on SimClock for scheduled follow-ups (e.g. auto-stop after a
+    volume dispense). This mirrors a real synchronous device client: the call
+    returns only after the simulated component has finished its finite work.
+    get() delegates directly to ComponentData.get().
     """
 
     def __init__(
@@ -106,14 +124,34 @@ class SimClient:
         clock: SimClock,
         cmd_queue: queue.Queue,
         project_path: Path,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self._name = name
         self._component = component
         self._clock = clock
         self._queue = cmd_queue
         self._project_path = project_path
+        self._stop_event = stop_event or threading.Event()
 
-    def put(self, command: str, **kwargs: Any) -> None:
+    def put(
+        self,
+        command: str,
+        *,
+        wait_time: float = 0.0,
+        wait_feedback_status: bool = False,
+        feedback_status_command: str = "",
+        feedback_answer: str = "true",
+        **kwargs: Any,
+    ) -> None:
+        """Apply a command and wait for its inferred simulated completion.
+
+        The named execution options are accepted only for compatibility with
+        archived process files. They are deliberately excluded from physics
+        kwargs; wait_time acts as a minimum simulated delay, while device
+        feedback completion is represented by PutResult.scheduled.
+        """
+        del wait_feedback_status, feedback_status_command, feedback_answer
+        self._raise_if_cancelled()
         write_pool_log(
             self._project_path,
             self._name,
@@ -121,23 +159,56 @@ class SimClient:
             command=command,
             params=kwargs or None,
         )
-        scheduled = []
+        started_at = self._clock.now()
+        pending: list[tuple[float, int, Any]] = []
+        order = count()
         for call_kwargs in iter_apply_kwargs(command, kwargs):
             result = self._component.apply(command, **call_kwargs)
-            scheduled.extend(result.scheduled)
+            for scheduled in result.scheduled:
+                heapq.heappush(
+                    pending,
+                    (started_at + scheduled.dt, next(order), scheduled),
+                )
         self._queue.put(
             SimCommand(
                 component=self._name, command=command, kwargs=kwargs, pre_applied=True
             )
         )
-        for s in scheduled:
-            threading.Thread(
-                target=self._deferred_enqueue,
-                args=(s.dt, s.command, s.kwargs),
-                daemon=True,
-            ).start()
+        while pending:
+            deadline, _, scheduled = heapq.heappop(pending)
+            _wait_until_sim_time(self._clock, deadline, self._stop_event)
+            result = self._component.apply(scheduled.command, **scheduled.kwargs)
+            self._queue.put(
+                SimCommand(
+                    component=self._name,
+                    command=scheduled.command,
+                    kwargs=scheduled.kwargs,
+                    pre_applied=True,
+                )
+            )
+            scheduled_at = self._clock.now()
+            for follow_up in result.scheduled:
+                heapq.heappush(
+                    pending,
+                    (scheduled_at + follow_up.dt, next(order), follow_up),
+                )
 
-    def get(self, command: str, **kwargs: Any) -> Any:
+        minimum_deadline = started_at + max(0.0, float(wait_time))
+        _wait_until_sim_time(self._clock, minimum_deadline, self._stop_event)
+
+    def get(
+        self,
+        command: str,
+        *,
+        wait_time: float = 0.0,
+        wait_feedback_status: bool = False,
+        feedback_status_command: str = "",
+        feedback_answer: str = "true",
+        **kwargs: Any,
+    ) -> Any:
+        del wait_feedback_status, feedback_status_command, feedback_answer
+        self._raise_if_cancelled()
+        started_at = self._clock.now()
         write_pool_log(
             self._project_path,
             self._name,
@@ -145,15 +216,14 @@ class SimClient:
             command=command,
             params=kwargs or None,
         )
-        return self._component.get(command, **kwargs)
+        result = self._component.get(command, **kwargs)
+        minimum_deadline = started_at + max(0.0, float(wait_time))
+        _wait_until_sim_time(self._clock, minimum_deadline, self._stop_event)
+        return result
 
-    def _deferred_enqueue(self, dt: float, command: str, kwargs: dict) -> None:
-        t0 = self._clock.now()
-        while self._clock.now() - t0 < dt:
-            time.sleep(0.0001)
-        self._queue.put(
-            SimCommand(component=self._name, command=command, kwargs=kwargs)
-        )
+    def _raise_if_cancelled(self) -> None:
+        if self._stop_event.is_set():
+            raise RunCancelledError("Run was cancelled.")
 
 
 class SimPlatform(Platform):
@@ -180,8 +250,5 @@ class SimPlatform(Platform):
         self._stop_event = stop_event
 
     def _wait(self, seconds: float) -> None:
-        t0 = self._sim_clock.now()
-        while self._sim_clock.now() - t0 < seconds:
-            if self._stop_event.is_set():
-                raise RunCancelledError("Run was cancelled.")
-            time.sleep(0.0001)
+        deadline = self._sim_clock.now() + max(0.0, float(seconds))
+        _wait_until_sim_time(self._sim_clock, deadline, self._stop_event)
