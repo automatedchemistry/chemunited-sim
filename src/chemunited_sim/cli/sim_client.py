@@ -8,9 +8,11 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 
 from chemunited_core.components import ComponentData
+from chemunited_workflow import Platform, RunCancelledError
+from chemunited_workflow.clients import ComponentClient
 
 from .clock import SimClock
 
@@ -67,10 +69,6 @@ def write_pool_log(
     method: str,
     command: str,
     params: dict | None,
-    wait_time: float,
-    wait_feedback_status: bool,
-    feedback_status_command: str,
-    feedback_answer: str,
 ) -> None:
     """Append one command entry to project_path/log/pool/<component>.jsonl.
 
@@ -84,10 +82,6 @@ def write_pool_log(
         "method": method,
         "command": command,
         "params": params,
-        "wait_time": wait_time,
-        "wait_feedback_status": wait_feedback_status,
-        "feedback_status_command": feedback_status_command,
-        "feedback_answer": feedback_answer,
     }
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(data) + "\n")
@@ -119,27 +113,13 @@ class SimClient:
         self._queue = cmd_queue
         self._project_path = project_path
 
-    def put(
-        self,
-        command: str,
-        *,
-        wait_time: float = 0.0,
-        wait_feedback_status: bool = False,
-        feedback_status_command: str = "",
-        feedback_answer: str = "true",
-        **kwargs: Any,
-    ) -> None:
+    def put(self, command: str, **kwargs: Any) -> None:
         write_pool_log(
             self._project_path,
             self._name,
             method="PUT",
             command=command,
             params=kwargs or None,
-            # sim time the command was sent, not the wait_time argument above
-            wait_time=self._clock.now(),
-            wait_feedback_status=wait_feedback_status,
-            feedback_status_command=feedback_status_command,
-            feedback_answer=feedback_answer,
         )
         scheduled = []
         for call_kwargs in iter_apply_kwargs(command, kwargs):
@@ -156,32 +136,16 @@ class SimClient:
                 args=(s.dt, s.command, s.kwargs),
                 daemon=True,
             ).start()
-        self._wait(wait_time)
 
-    def get(
-        self,
-        command: str,
-        *,
-        wait_time: float = 0.0,
-        wait_feedback_status: bool = False,
-        feedback_status_command: str = "",
-        feedback_answer: str = "true",
-        **kwargs: Any,
-    ) -> Any:
+    def get(self, command: str, **kwargs: Any) -> Any:
         write_pool_log(
             self._project_path,
             self._name,
             method="GET",
             command=command,
             params=kwargs or None,
-            wait_time=self._clock.now(),
-            wait_feedback_status=wait_feedback_status,
-            feedback_status_command=feedback_status_command,
-            feedback_answer=feedback_answer,
         )
-        result = self._component.get(command, **kwargs)
-        self._wait(wait_time)
-        return result
+        return self._component.get(command, **kwargs)
 
     def _deferred_enqueue(self, dt: float, command: str, kwargs: dict) -> None:
         t0 = self._clock.now()
@@ -191,7 +155,33 @@ class SimClient:
             SimCommand(component=self._name, command=command, kwargs=kwargs)
         )
 
-    def _wait(self, duration: float) -> None:
-        t0 = self._clock.now()
-        while self._clock.now() - t0 < duration:
+
+class SimPlatform(Platform):
+    """Platform whose _wait() blocks on SimClock instead of real time.
+
+    Mirrors chemunited_workflow.platform.Platform._wait(), which protocols
+    call directly for a fixed delay unrelated to any specific device. Mode 1
+    runs at CPU speed on SimClock, not wall-clock pace, so this busy-waits on
+    simulated time instead — interruptible by the same stop_event used to
+    abort a running simulation, matching the real method's cancellation-token
+    behavior.
+    """
+
+    def __init__(
+        self,
+        components: dict[str, SimClient],
+        clock: SimClock,
+        stop_event: threading.Event,
+    ) -> None:
+        # Platform copies the mapping; SimClient intentionally provides its
+        # ComponentClient-compatible command surface without HTTP behavior.
+        super().__init__(cast(dict[str, ComponentClient], components))
+        self._sim_clock = clock
+        self._stop_event = stop_event
+
+    def _wait(self, seconds: float) -> None:
+        t0 = self._sim_clock.now()
+        while self._sim_clock.now() - t0 < seconds:
+            if self._stop_event.is_set():
+                raise RunCancelledError("Run was cancelled.")
             time.sleep(0.0001)

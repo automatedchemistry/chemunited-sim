@@ -36,7 +36,13 @@ from .loader import (
     parse_historical_file,
     resolve_historical_file,
 )
-from .sim_client import SimClient, SimCommand, iter_apply_kwargs, write_pool_log
+from .sim_client import (
+    SimClient,
+    SimCommand,
+    SimPlatform,
+    iter_apply_kwargs,
+    write_pool_log,
+)
 
 # ---------------------------------------------------------------------------
 # State types
@@ -363,10 +369,6 @@ class CommandRequest(BaseModel):
     component: str
     command: str
     kwargs: dict = {}
-    wait_time: float = 0.0
-    wait_feedback_status: bool = False
-    feedback_status_command: str = ""
-    feedback_answer: str = "true"
 
 
 # -- Endpoints --------------------------------------------------------------
@@ -529,13 +531,15 @@ def post_simulation_start(req: StartSimRequest) -> dict:
         except FileNotFoundError as exc:
             raise HTTPException(422, str(exc))
 
-        sim_platform = Platform(
+        sim_platform = SimPlatform(
             {
                 name: SimClient(  # type: ignore[misc]
                     name, comp, state.clock, state.cmd_queue, project.project_path
                 )
                 for name, comp in project.components.items()
-            }
+            },
+            state.clock,
+            state._stop_event,
         )
 
         state._workflow_thread = Thread(
@@ -627,10 +631,6 @@ def post_simulation_command(req: CommandRequest) -> dict:
         method="PUT",
         command=req.command,
         params=req.kwargs or None,
-        wait_time=state.clock.now(),
-        wait_feedback_status=req.wait_feedback_status,
-        feedback_status_command=req.feedback_status_command,
-        feedback_answer=req.feedback_answer,
     )
     state.cmd_queue.put(
         SimCommand(component=req.component, command=req.command, kwargs=req.kwargs)

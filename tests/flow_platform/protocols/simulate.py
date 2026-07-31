@@ -61,16 +61,18 @@ class CustomProcess(Process[ProcessConfig]):
         return True
 
     def wait(self, _ctx: NodeExecutionContext) -> bool:
-        self.platform["divertvalve"].put("open", wait_time=20.0)
+        self.platform["divertvalve"].put("open")
+        self.platform._wait(20.0)
         self.platform["chiller"].put("temperature", temp="330 K")
-        self.platform["liquidpump"].put(
-            "infuse", rate="3 ml/min", volume="60 ml", wait_time=10.0
-        )
+        self.platform["liquidpump"].put("infuse", rate="3 ml/min", volume="60 ml")
+        self.platform._wait(10.0)
         self.platform["pump"].put("infuse", rate="0.3 ml/min", volume="6 ml")
         self.platform["mfc"].put("set-flow-rate", flowrate="1 ml/min")
-        self.platform["divertvalve"].put("open", wait_time=20.0)
+        self.platform["divertvalve"].put("open")
+        self.platform._wait(20.0)
         remaining = max(0.0, self.config.wait_time - 20.0)
-        self.platform["divertvalve"].put("close", wait_time=remaining)
+        self.platform["divertvalve"].put("close")
+        self.platform._wait(remaining)
         return True
 
     def finish(self, ctx: NodeExecutionContext) -> bool:

@@ -120,10 +120,6 @@ def register_tools(mcp: FastMCP) -> None:
         component: str,
         command: str,
         kwargs: dict | None = None,
-        wait_time: float = 0.0,
-        wait_feedback_status: bool = False,
-        feedback_status_command: str = "",
-        feedback_answer: str = "true",
     ) -> dict:
         """Enqueue a component command during a real-time (mode 2) run.
 
@@ -137,10 +133,6 @@ def register_tools(mcp: FastMCP) -> None:
                     component=component,
                     command=command,
                     kwargs=kwargs or {},
-                    wait_time=wait_time,
-                    wait_feedback_status=wait_feedback_status,
-                    feedback_status_command=feedback_status_command,
-                    feedback_answer=feedback_answer,
                 )
             )
         except HTTPException as exc:
