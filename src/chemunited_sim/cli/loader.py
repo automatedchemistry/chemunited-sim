@@ -13,6 +13,7 @@ from types import ModuleType
 
 from chemunited_core.components import ComponentData
 from chemunited_core.compounds import COMPOUNDS
+from chemunited_core.figure_registry.project_loader import load_project_components
 from chemunited_workflow.process import Process
 from loguru import logger
 
@@ -86,6 +87,10 @@ def load_project(path: Path) -> ProjectState:
     """
     project_dir = _resolve_project_dir(path)
     logger.info("Resolved project directory: {}", project_dir)
+
+    custom_figures = load_project_components(project_dir)
+    if custom_figures:
+        logger.info("Custom components registered: {}", custom_figures)
 
     setup_path = project_dir / "draw" / "setup.py"
     if not setup_path.exists():
