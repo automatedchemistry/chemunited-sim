@@ -18,7 +18,7 @@ from fastapi.responses import RedirectResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from ..adapter.graph import resync_component
+from ..adapter.graph import propagate_power_links, resync_component
 from ..recorder.writer import Recorder
 from ..visualization import (
     NoSnapshotsError,
@@ -145,6 +145,11 @@ def _worker_thread_fn(
     graph = project.graph
 
     scheduled: list[tuple[float, SimCommand]] = []
+    power_state_cache: dict[tuple[str, int], bool] = {}
+    for link in graph.power_links:
+        provider = components.get(link.provider_component)
+        if provider is not None:
+            propagate_power_links(provider, graph, components, power_state_cache)
     wall_t0 = time.monotonic()
     sim_t0 = clock.now()
 
@@ -186,6 +191,9 @@ def _worker_thread_fn(
                                 ),
                             )
                     resync_component(graph, components[cmd.component])
+                propagate_power_links(
+                    components[cmd.component], graph, components, power_state_cache
+                )
 
             # 2. Fire scheduled events that are now due
             while scheduled and scheduled[0][0] <= clock.now():
@@ -200,6 +208,12 @@ def _worker_thread_fn(
                     sched_cmd.command, **sched_cmd.kwargs
                 )
                 resync_component(graph, components[sched_cmd.component])
+                propagate_power_links(
+                    components[sched_cmd.component],
+                    graph,
+                    components,
+                    power_state_cache,
+                )
 
             # 3. Check t_end
             if config.t_end is not None and worker.t >= config.t_end:

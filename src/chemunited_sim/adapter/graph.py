@@ -17,11 +17,16 @@ from chemunited_core.components.enums import InternalEdgeRole
 from chemunited_core.components.internals import InventoryNode
 from chemunited_core.components.plugflow import PlugFlowComponentData
 from chemunited_core.connections.edge import EdgeData
-from chemunited_core.figure_registry import Gantry3DData, VialData
+from chemunited_core.figure_registry import (
+    Gantry3DData,
+    MultiChannelData,
+    MultiChannelRelayData,
+    VialData,
+)
 from loguru import logger
 
 from .compilers import _COMPILERS, compile_component
-from .models import HeatLink, HydraulicEdge, HydraulicGraph, HydraulicNode
+from .models import HeatLink, HydraulicEdge, HydraulicGraph, HydraulicNode, PowerLink
 
 
 def resync_component(graph: HydraulicGraph, comp: ComponentData) -> None:
@@ -45,6 +50,47 @@ def resync_component(graph: HydraulicGraph, comp: ComponentData) -> None:
             hydraulic_edge.forced_flow = internal_edge.forced_flow_override
 
 
+def propagate_power_links(
+    provider: ComponentData,
+    graph: HydraulicGraph,
+    components_by_name: dict[str, ComponentData],
+    power_state_cache: dict[tuple[str, int], bool],
+) -> None:
+    """Energize/de-energize every target wired to ``provider``'s channels.
+
+    Call immediately after ``provider.apply(...)`` + ``resync_component(graph,
+    provider)`` for any command applied to a component. No-ops for any
+    component that is not a :class:`MultiChannelRelayData`. Walks
+    ``graph.power_links`` for links whose ``provider_component`` matches,
+    compares each channel's new ``active`` state against ``power_state_cache``,
+    and only re-applies ``"power-on"``/``"power-off"`` (+ resync) to the
+    linked target(s) on an actual transition -- so redundant commands (e.g.
+    ``"power-on"`` sent twice for an already-ON channel) do not re-invoke
+    ``target.apply()`` and risk re-triggering side effects such as a
+    scheduled follow-up event.
+    """
+    if not isinstance(provider, MultiChannelRelayData):
+        return
+    for link in graph.power_links:
+        if link.provider_component != provider.name:
+            continue
+        if not isinstance(link.provider_port, int):
+            continue
+        index = link.provider_port - 1
+        if not (0 <= index < len(provider.active)):
+            continue
+        new_state = bool(provider.active[index])
+        cache_key = (provider.name, link.provider_port)
+        if power_state_cache.get(cache_key) == new_state:
+            continue
+        power_state_cache[cache_key] = new_state
+        target = components_by_name.get(link.target_component)
+        if target is None:
+            continue
+        target.apply("power-on" if new_state else "power-off")
+        resync_component(graph, target)
+
+
 def _port_category(
     comp: ComponentData, port_number: int | str
 ) -> ConnectionType | None:
@@ -60,6 +106,14 @@ def _is_heat_provider(comp: ComponentData) -> bool:
 
 def _is_heat_target(comp: ComponentData) -> bool:
     return bool(getattr(comp, "heat_exchange", False)) and not _is_heat_provider(comp)
+
+
+def _is_electronic_provider(comp: ComponentData) -> bool:
+    return isinstance(comp, MultiChannelRelayData)
+
+
+def _is_electronic_target(comp: ComponentData) -> bool:
+    return not isinstance(comp, MultiChannelData)
 
 
 def _is_autosampler_contact_edge(
@@ -120,6 +174,60 @@ def _compile_heat_link(
     linked_targets.add(target.name)
 
     return HeatLink(
+        provider_component=provider.name,
+        provider_port=provider_port,
+        target_component=target.name,
+        target_port=target_port,
+    )
+
+
+def _compile_power_link(
+    edge_data: EdgeData,
+    components_by_name: dict[str, ComponentData],
+    linked_targets: set[str],
+) -> PowerLink:
+    endpoints = [
+        (edge_data.origin, edge_data.origin_port),
+        (edge_data.destination, edge_data.destination_port),
+    ]
+    resolved: list[tuple[ComponentData, int | str]] = []
+
+    for comp_name, port_number in endpoints:
+        comp = components_by_name.get(comp_name)
+        if comp is None:
+            raise ValueError(
+                f"ELECTRONIC edge '{edge_data.name}' references unknown component "
+                f"'{comp_name}'"
+            )
+        if _port_category(comp, port_number) != ConnectionType.ELECTRONIC:
+            raise ValueError(
+                f"ELECTRONIC edge '{edge_data.name}' endpoint "
+                f"'{comp_name}.{port_number}' is not an ELECTRONIC port"
+            )
+        resolved.append((comp, port_number))
+
+    providers = [
+        (comp, port) for comp, port in resolved if _is_electronic_provider(comp)
+    ]
+    targets = [(comp, port) for comp, port in resolved if _is_electronic_target(comp)]
+
+    if len(providers) != 1 or len(targets) != 1:
+        names = ", ".join(f"{comp.name}.{port}" for comp, port in resolved)
+        raise ValueError(
+            f"ELECTRONIC edge '{edge_data.name}' must connect exactly one relay "
+            f"channel to one energizable target; got {names}"
+        )
+
+    provider, provider_port = providers[0]
+    target, target_port = targets[0]
+    if target.name in linked_targets:
+        raise ValueError(
+            f"Component '{target.name}' has multiple electronic providers; only "
+            "one relay channel per target is supported"
+        )
+    linked_targets.add(target.name)
+
+    return PowerLink(
         provider_component=provider.name,
         provider_port=provider_port,
         target_component=target.name,
@@ -283,6 +391,18 @@ def compile_graph(
         )
 
     # ------------------------------------------------------------------
+    # Pass 4: power links
+    # ------------------------------------------------------------------
+    power_links: list[PowerLink] = []
+    linked_power_targets: set[str] = set()
+    for edge_data in edges:
+        if edge_data.classification != ConnectionType.ELECTRONIC:
+            continue
+        power_links.append(
+            _compile_power_link(edge_data, components_by_name, linked_power_targets)
+        )
+
+    # ------------------------------------------------------------------
     # Assembly
     # ------------------------------------------------------------------
     return HydraulicGraph(
@@ -290,4 +410,5 @@ def compile_graph(
         edges=all_edges,
         inventory_nodes=all_inventory,
         heat_links=heat_links,
+        power_links=power_links,
     )

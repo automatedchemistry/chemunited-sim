@@ -34,6 +34,22 @@ class HeatLink:
 
 
 @dataclass(frozen=True)
+class PowerLink:
+    """Electronic energize/de-energize connection between a relay channel and
+    a target component's ELECTRONIC port.
+
+    The provider is a multi-channel relay box; each of its channels can drive
+    one or more targets (fan-out is allowed). The target's energized state
+    tracks the provider channel's ``active`` flag.
+    """
+
+    provider_component: str
+    provider_port: int | str
+    target_component: str
+    target_port: int | str
+
+
+@dataclass(frozen=True)
 class HydraulicNode:
     """A single node in the flat hydraulic network graph.
 
@@ -139,3 +155,4 @@ class HydraulicGraph:
     edges: dict[str, HydraulicEdge] = field(default_factory=dict)
     inventory_nodes: dict[str, InventoryNode] = field(default_factory=dict)
     heat_links: list[HeatLink] = field(default_factory=list)
+    power_links: list[PowerLink] = field(default_factory=list)

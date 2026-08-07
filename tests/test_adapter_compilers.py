@@ -9,7 +9,11 @@ from chemunited_core.components.enums import BoundaryConditionKind
 from chemunited_core.connections import EdgeData, EdgeMode
 from chemunited_core.figure_registry import COMPONENTS
 
-from chemunited_sim.adapter import compile_graph, resync_component
+from chemunited_sim.adapter import (
+    compile_graph,
+    propagate_power_links,
+    resync_component,
+)
 
 
 def test_solenoid_valve_2_way_common_port_compiles_as_hub():
@@ -190,3 +194,146 @@ def test_heat_connection_rejects_non_heat_endpoint():
 
     with pytest.raises(ValueError, match="not a HEAT port"):
         compile_graph([controller, vessel], [edge])
+
+
+def _electronic_edge(
+    name: str, origin: str, origin_port, destination: str, destination_port
+) -> EdgeData:
+    return EdgeData.from_mode(
+        EdgeMode(
+            name=name,
+            origin=origin,
+            origin_port=origin_port,
+            destination=destination,
+            destination_port=destination_port,
+            classification=ConnectionType.ELECTRONIC,
+        )
+    )
+
+
+def test_power_connection_compiles_as_power_link_not_hydraulic_edge():
+    relay_defn = COMPONENTS["MultiChannelRelay"]
+    valve_defn = COMPONENTS["SolenoidValve"]
+    relay = relay_defn.data_class.from_mode(relay_defn.mode_class(name="relay"))
+    valve = valve_defn.data_class.from_mode(valve_defn.mode_class(name="solenoid"))
+    edge = _electronic_edge("power_link", "relay", 1, "solenoid", 3)
+
+    graph = compile_graph([relay, valve], [edge])
+
+    assert len(graph.power_links) == 1
+    link = graph.power_links[0]
+    assert link.provider_component == "relay"
+    assert link.provider_port == 1
+    assert link.target_component == "solenoid"
+    assert link.target_port == 3
+    assert "power_link" not in graph.edges
+    assert "relay.1" not in graph.nodes
+
+
+def test_power_connection_fan_out_to_multiple_targets():
+    relay_defn = COMPONENTS["MultiChannelRelay"]
+    valve_defn = COMPONENTS["SolenoidValve"]
+    relay = relay_defn.data_class.from_mode(relay_defn.mode_class(name="relay"))
+    valve_a = valve_defn.data_class.from_mode(valve_defn.mode_class(name="valvea"))
+    valve_b = valve_defn.data_class.from_mode(valve_defn.mode_class(name="valveb"))
+    edge_a = _electronic_edge("link_a", "relay", 1, "valvea", 3)
+    edge_b = _electronic_edge("link_b", "relay", 1, "valveb", 3)
+
+    graph = compile_graph([relay, valve_a, valve_b], [edge_a, edge_b])
+
+    assert len(graph.power_links) == 2
+    assert {link.target_component for link in graph.power_links} == {
+        "valvea",
+        "valveb",
+    }
+    assert all(link.provider_port == 1 for link in graph.power_links)
+
+
+def test_power_connection_rejects_second_provider_for_same_target():
+    relay_defn = COMPONENTS["MultiChannelRelay"]
+    valve_defn = COMPONENTS["SolenoidValve"]
+    relay_a = relay_defn.data_class.from_mode(relay_defn.mode_class(name="relaya"))
+    relay_b = relay_defn.data_class.from_mode(relay_defn.mode_class(name="relayb"))
+    valve = valve_defn.data_class.from_mode(valve_defn.mode_class(name="solenoid"))
+    edge_a = _electronic_edge("link_a", "relaya", 1, "solenoid", 3)
+    edge_b = _electronic_edge("link_b", "relayb", 1, "solenoid", 3)
+
+    with pytest.raises(ValueError, match="multiple electronic providers"):
+        compile_graph([relay_a, relay_b, valve], [edge_a, edge_b])
+
+
+def test_power_connection_rejects_non_electronic_endpoint():
+    relay_defn = COMPONENTS["MultiChannelRelay"]
+    valve_defn = COMPONENTS["SolenoidValve"]
+    relay = relay_defn.data_class.from_mode(relay_defn.mode_class(name="relay"))
+    valve = valve_defn.data_class.from_mode(valve_defn.mode_class(name="solenoid"))
+    edge = _electronic_edge("bad_power_link", "relay", 1, "solenoid", 1)
+
+    with pytest.raises(ValueError, match="not an ELECTRONIC port"):
+        compile_graph([relay, valve], [edge])
+
+
+def test_power_connection_rejects_relay_to_adc_miswiring():
+    relay_defn = COMPONENTS["MultiChannelRelay"]
+    adc_defn = COMPONENTS["MultiChannelADC"]
+    relay = relay_defn.data_class.from_mode(relay_defn.mode_class(name="relay"))
+    adc = adc_defn.data_class.from_mode(adc_defn.mode_class(name="adc"))
+    edge = _electronic_edge("bad_power_link", "relay", 1, "adc", 1)
+
+    with pytest.raises(ValueError, match="must connect exactly one relay channel"):
+        compile_graph([relay, adc], [edge])
+
+
+def test_propagate_power_links_energizes_and_deenergizes_target():
+    relay_defn = COMPONENTS["MultiChannelRelay"]
+    valve_defn = COMPONENTS["SolenoidValve"]
+    relay = relay_defn.data_class.from_mode(relay_defn.mode_class(name="relay"))
+    valve = valve_defn.data_class.from_mode(
+        valve_defn.mode_class(name="solenoid", normally_open=True)
+    )
+    edge = _electronic_edge("power_link", "relay", 1, "solenoid", 3)
+    graph = compile_graph([relay, valve], [edge])
+    components_by_name = {"relay": relay, "solenoid": valve}
+    cache: dict[tuple[str, int], bool] = {}
+
+    calls: list[str] = []
+    original_apply = valve.apply
+
+    def _spy_apply(command, **kwargs):
+        calls.append(command)
+        return original_apply(command, **kwargs)
+
+    valve.apply = _spy_apply
+
+    relay.apply("power-on", channel="1")
+    propagate_power_links(relay, graph, components_by_name, cache)
+
+    assert valve.opened is False
+    assert graph.edges["solenoid.1.2"].resistance_override is not None
+    assert calls == ["power-on"]
+
+    # Repeating the same command is a no-op transition: propagate_power_links
+    # must not re-invoke the target's apply().
+    relay.apply("power-on", channel="1")
+    propagate_power_links(relay, graph, components_by_name, cache)
+    assert calls == ["power-on"]
+
+    relay.apply("power-off", channel="1")
+    propagate_power_links(relay, graph, components_by_name, cache)
+    assert valve.opened is True
+    assert graph.edges["solenoid.1.2"].resistance_override is None
+    assert calls == ["power-on", "power-off"]
+
+
+def test_propagate_power_links_leaves_unlinked_target_untouched():
+    relay_defn = COMPONENTS["MultiChannelRelay"]
+    valve_defn = COMPONENTS["SolenoidValve"]
+    relay = relay_defn.data_class.from_mode(relay_defn.mode_class(name="relay"))
+    valve = valve_defn.data_class.from_mode(valve_defn.mode_class(name="solenoid"))
+    graph = compile_graph([relay, valve], [])
+    components_by_name = {"relay": relay, "solenoid": valve}
+
+    relay.apply("power-on", channel="1")
+    propagate_power_links(relay, graph, components_by_name, {})
+
+    assert valve.opened is True
