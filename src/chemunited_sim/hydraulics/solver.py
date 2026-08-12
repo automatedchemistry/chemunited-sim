@@ -16,9 +16,10 @@ import scipy.sparse.csgraph
 import scipy.sparse.linalg
 from chemunited_core.common.constant import ATMOSPHERE_PRESSURE_PA
 from chemunited_core.components.enums import BoundaryConditionKind, InternalEdgeRole
+from loguru import logger
 
 from ..adapter.models import HydraulicEdge, HydraulicGraph
-from ..common.constant import ETA_WATER_25C, R_JUNCTION
+from ..common.constant import ETA_WATER_25C, PRESSURE_SANITY_THRESHOLD_PA, R_JUNCTION
 from ..common.edges import is_hydraulically_closed
 from .models import HydraulicSolveError, HydraulicState
 
@@ -207,7 +208,19 @@ def solve(
     # ------------------------------------------------------------------
     for comp_idx in range(n_components):
         if comp_idx not in dirichlet_components:
-            anchor = int(np.where(labels == comp_idx)[0][0])
+            component_nodes = np.where(labels == comp_idx)[0]
+            anchor = int(component_nodes[0])
+            logger.debug(
+                "solve: connected component with {} node(s) has no Dirichlet "
+                "(PRESSURE) boundary condition; anchoring node '{}' to "
+                "atmospheric pressure ({:.0f} Pa) to keep the system solvable. "
+                "If this is unexpected, check for a missing vent/PRESSURE BC "
+                "(e.g. a Sink or vessel with pressure_access=True, which "
+                "suppresses the automatic atmospheric BC).",
+                int(component_nodes.size),
+                node_ids[anchor],
+                float(ATMOSPHERE_PRESSURE_PA),
+            )
             Y[anchor, :] = 0.0
             Y[anchor, anchor] = 1.0
             Q[anchor] = float(ATMOSPHERE_PRESSURE_PA)
@@ -222,6 +235,31 @@ def solve(
         raise HydraulicSolveError(
             f"Hydraulic solve failed — check graph connectivity: {exc}"
         ) from exc
+
+    # ------------------------------------------------------------------
+    # Physical-sanity check: flag (do not raise for — see module docstring)
+    # any solved pressure that is wildly implausible for a real hydraulic
+    # network. Explicitly checks non-finite values too: `abs(nan - x) >
+    # threshold` is False in numpy, so a NaN/inf result from a near-singular
+    # system would otherwise slip past silently.
+    # ------------------------------------------------------------------
+    non_finite = ~np.isfinite(P)
+    implausible = non_finite | (
+        np.abs(P - float(ATMOSPHERE_PRESSURE_PA)) > PRESSURE_SANITY_THRESHOLD_PA
+    )
+    if np.any(implausible):
+        offending = np.where(implausible)[0]
+        offenders = ", ".join(f"'{node_ids[i]}'={P[i]!r} Pa" for i in offending[:10])
+        logger.warning(
+            "solve: {} node(s) solved to a physically-implausible pressure "
+            "(non-finite or >|{:.3e}| Pa from atmospheric): {}{}. Check graph "
+            "connectivity, boundary conditions, and any newly-opened "
+            "near-zero-resistance (JUNCTION) edges.",
+            offending.size,
+            PRESSURE_SANITY_THRESHOLD_PA,
+            offenders,
+            ", ..." if offending.size > 10 else "",
+        )
 
     pressures: dict[str, float] = {node_ids[i]: float(P[i]) for i in range(n)}
 

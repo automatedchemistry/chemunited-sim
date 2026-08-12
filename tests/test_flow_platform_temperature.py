@@ -145,6 +145,53 @@ def test_liquidpump_source_uses_carrier_only_after_runtime_inventory_runs_dry():
     assert any("SyringePump 'liquidpump' ran dry" in message for message in messages)
 
 
+def test_liquidpump_source_falls_back_to_gas_when_liquid_alone_is_insufficient():
+    """Regression test for the stranded-gas-phase bug: an air-gap syringe
+    (liquid partially drawn down, real gas headspace already present in the
+    same barrel) must draw the full requested dV from the gas phase that is
+    genuinely available -- not synthesize carrier air while stranding real
+    gas content, and not warn "ran dry" when a real fallback phase exists.
+    """
+    project = load_project(PROJECT_PATH)
+    states = build_inventory_states(project.graph)
+    source_map = build_source_map(project.graph, list(project.components.values()))
+    state = states["liquidpump.Inventory"]
+    # Air-gap scenario: liquid alone can't cover dV, but gas headspace can.
+    state.liq_volume = 2.0e-9
+    state.liq_species_moles = {"solvent": 3.0}
+    state.gas_volume = 1.0e-8
+    state.gas_species_moles = {"nitrogen": 4.0}
+    messages = []
+    handler_id = logger.add(
+        lambda message: messages.append(str(message)),
+        level="WARNING",
+        format="{message}",
+    )
+
+    try:
+        emitted = emit_from_sources(
+            source_map,
+            project.graph,
+            HydraulicState(
+                pressures={"liquidpump.1": 101_325.0},
+                flows={"liquidpump_1_tmixer_2": 1.0e-8},
+            ),
+            states,
+            dt=0.5,
+        )
+    finally:
+        logger.remove(handler_id)
+
+    pocket = emitted["liquidpump_1_tmixer_2"]  # dV = 1e-8 * 0.5 = 5e-9 m^3
+    assert pocket.phase_kind == PhaseKind.GAS
+    assert pocket.volume == pytest.approx(5.0e-9)
+    assert pocket.species_moles == {"nitrogen": pytest.approx(2.0)}
+    assert "air" not in pocket.species_moles
+    assert state.liq_volume == pytest.approx(2.0e-9)  # untouched this tick
+    assert state.gas_volume == pytest.approx(5.0e-9)
+    assert not any("SyringePump 'liquidpump' ran dry" in m for m in messages)
+
+
 def test_liquidpump_withdraw_assimilates_into_runtime_inventory():
     project = load_project(PROJECT_PATH)
     states = build_inventory_states(project.graph)

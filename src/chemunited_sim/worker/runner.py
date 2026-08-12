@@ -25,6 +25,7 @@ from chemunited_core.common.enums import PhaseKind
 from chemunited_core.components import (
     BackPressureRegulatorData,
     ComponentData,
+    FlowSourceData,
     MassFlowControllerData,
     PlugFlowComponentData,
     PumpData,
@@ -84,6 +85,16 @@ class _MfcEntry:
     upstream_node_id: str
     downstream_node_id: str
     edge: HydraulicEdge
+
+
+@dataclass
+class _FlowSourceEntry:
+    """Pre-resolved FlowSource/SyringePump nozzle metadata for seeding."""
+
+    comp: FlowSourceData
+    edge: HydraulicEdge
+    port_node_id: str
+    inv_node_id: str
 
 
 @dataclass
@@ -175,6 +186,30 @@ def _build_mfc_entries(
                 upstream_node_id=f"{comp.name}.1",
                 downstream_node_id=f"{comp.name}.2",
                 edge=edge,
+            )
+        )
+    return entries
+
+
+def _build_flow_source_entries(
+    graph: HydraulicGraph,
+    components: list[ComponentData],
+) -> list[_FlowSourceEntry]:
+    """Resolve FlowSource/SyringePump nozzle metadata from the compiled graph."""
+    entries: list[_FlowSourceEntry] = []
+    for comp in components:
+        if not isinstance(comp, FlowSourceData):
+            continue
+        edge_id = f"{comp.name}.1.Inventory"
+        edge = graph.edges.get(edge_id)
+        if edge is None:
+            continue
+        entries.append(
+            _FlowSourceEntry(
+                comp=comp,
+                edge=edge,
+                port_node_id=f"{comp.name}.1",
+                inv_node_id=f"{comp.name}.Inventory",
             )
         )
     return entries
@@ -499,6 +534,9 @@ class Worker:
         )
         self._bpr_entries: list[_BprEntry] = _build_bpr_entries(graph, components)
         self._mfc_entries: list[_MfcEntry] = _build_mfc_entries(graph, components)
+        self._flow_source_entries: list[_FlowSourceEntry] = _build_flow_source_entries(
+            graph, components
+        )
         self._pump_entries: list[_PumpEntry] = _build_pump_entries(graph, components)
         vessel_heat_entries = _build_vessel_heat_entries(components)
         self._dynamic_vessel_heat_entries = [
@@ -591,6 +629,89 @@ class Worker:
             hyd_state = solve(self._graph, self._config.viscosity)
         return hyd_state
 
+    def _seed_uncalibrated_mfc_edges(self) -> None:
+        """Give a freshly-opened MFC edge a real resistance before it is solved.
+
+        ``MFCComponentData.apply()`` opens the edge immediately on
+        ``set-flow-rate`` (``resistance_override = None``), by design — see
+        that method's docstring and its regression test. But an open,
+        not-yet-calibrated ``JUNCTION`` edge falls back to the solver's
+        ``R_JUNCTION`` constant, which is sized for genuinely passive
+        junctions (e.g. ``Distributor``) and is several orders of magnitude
+        below normal tube resistance. Without this seeding, the edge would
+        behave as a near-short-circuit for the one tick between ``apply()``
+        and the post-solve recalibration below — which, combined with other
+        forced-flow sources sharing the same junction, can drive the solve
+        to a non-physical pressure/flow solution.
+
+        Uses the last completed solve's pressures (one tick stale, same
+        input the post-solve recalibration would use next) to compute a
+        real starting resistance for any MFC edge that is still uncalibrated
+        (``resistance_override is None``). A no-op once calibrated, and a
+        no-op on the very first tick (no prior solve to seed from yet).
+        """
+        if self._hyd_state is None:
+            return
+        for mfc_entry in self._mfc_entries:
+            if mfc_entry.edge.resistance_override is not None:
+                continue
+            dp = self._hyd_state.pressures.get(
+                mfc_entry.upstream_node_id, 0.0
+            ) - self._hyd_state.pressures.get(mfc_entry.downstream_node_id, 0.0)
+            mfc_entry.comp.update_resistance(dp)
+            mfc_entry.edge.resistance_override = mfc_entry.comp.internal_edges[
+                (1, 2)
+            ].resistance_override
+
+    def _seed_uncalibrated_flow_source_edges(self) -> None:
+        """Give a freshly-opened FlowSource nozzle edge a real resistance before solve.
+
+        Mirrors `_seed_uncalibrated_mfc_edges`: `FlowSourceData.sync_internal_state()`
+        (called from `apply()`) opens the barrel -> port-1 nozzle edge
+        (`resistance_override = None`) the instant `flow_rate` becomes nonzero,
+        by design. But an open, not-yet-calibrated JUNCTION edge falls back to
+        the solver's `R_JUNCTION` constant -- several orders of magnitude below
+        normal tube resistance -- for the tick between `apply()` and here, while
+        the Inventory node's FLOW (Neumann) boundary condition is simultaneously
+        live on the very same node. Combined with a connected component that
+        lacks a nearby Dirichlet reference, this can drive the solve to a
+        non-physical pressure spike (see `hydraulics.solver.solve`'s
+        atmospheric-anchor fallback and its physical-sanity warning).
+
+        Uses the last completed solve's pressures (one tick stale, same input
+        the MFC seeding above uses) to compute a real starting resistance via
+        Ohm's law (R = dp / flow_rate) for any nozzle edge that is still
+        uncalibrated (`resistance_override is None`). A no-op once seeded or
+        closed (both carry a non-None `resistance_override`), and a no-op on
+        the very first tick (no prior solve to seed from yet).
+
+        Unlike MFC, the seeded value is not recalibrated every tick afterward:
+        FlowSource's delivered flow is already enforced exactly by the
+        Inventory node's FLOW boundary condition, independent of the nozzle's
+        resistance, so a one-time seed is sufficient to avoid the single-tick
+        near-short-circuit transient. `sync_internal_state()` resets
+        `resistance_override` back to `None` via `edge.open()` on every
+        `apply()` call while flow_rate is nonzero (including a rate change,
+        and after a stop/restart), so this re-seeds at the start of each new
+        command rather than freezing for the whole run.
+        """
+        if self._hyd_state is None:
+            return
+        for entry in self._flow_source_entries:
+            if entry.edge.resistance_override is not None:
+                continue
+            flow = entry.comp.flow_rate_si
+            if flow == 0.0:
+                continue
+            dp = self._hyd_state.pressures.get(
+                entry.inv_node_id, 0.0
+            ) - self._hyd_state.pressures.get(entry.port_node_id, 0.0)
+            r = dp / flow
+            if r == 0.0:
+                continue
+            entry.edge.resistance_override = r
+            entry.comp.internal_edges[(1, "Inventory")].resistance_override = r
+
     def step(self) -> None:
         """Execute one operator-splitting time step.
 
@@ -598,6 +719,17 @@ class Worker:
         ``recorder.record(t=0)`` captures the initial condition.  After
         returning, :attr:`t` has been incremented by ``config.dt``.
         """
+        # 0. Seed any freshly-opened, uncalibrated MFC edge from the last
+        # known pressures so it isn't briefly a near-short-circuit at the
+        # generic JUNCTION resistance fallback (see docstring above).
+        self._seed_uncalibrated_mfc_edges()
+
+        # 0b. Same principle for FlowSource/SyringePump nozzle edges: a
+        # freshly-opened barrel->port-1 nozzle also falls back to the bare
+        # R_JUNCTION resistance while the Inventory node's FLOW BC is
+        # simultaneously live — seed it too before this tick's solve.
+        self._seed_uncalibrated_flow_source_edges()
+
         # 1. Solve hydraulics
         hyd_state = solve(self._graph, self._config.viscosity)
 

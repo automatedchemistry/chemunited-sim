@@ -494,8 +494,16 @@ def emit_from_sources(
             state = states.get(entry.inv_node_id)
             if state is None:
                 continue
-            phase = PhaseKind.LIQUID if primary_liquid else PhaseKind.GAS
+            preferred_phase = PhaseKind.LIQUID if primary_liquid else PhaseKind.GAS
+            fallback_phase = (
+                PhaseKind.GAS
+                if preferred_phase == PhaseKind.LIQUID
+                else PhaseKind.LIQUID
+            )
+            phase = _select_emit_phase(state, preferred_phase, fallback_phase, dV)
             available = _phase_volume(state, phase)
+            preferred_available = _phase_volume(state, preferred_phase)
+            fallback_available = _phase_volume(state, fallback_phase)
             species = _phase_species(state, phase)
             emit_vol = min(max(0.0, available), dV)
             species_moles: dict[str, float] = {}
@@ -511,11 +519,16 @@ def emit_from_sources(
             if deficit > 0.0:
                 logger.warning(
                     "emit_from_sources: SyringePump '{}' ran dry; selected "
-                    "phase {} available={:.3e} m^3, requested dV={:.3e} m^3, "
-                    "carrier deficit={:.3e} m^3.",
+                    "phase {} available={:.3e} m^3, preferred={} "
+                    "available={:.3e} m^3, fallback={} available={:.3e} m^3, "
+                    "requested dV={:.3e} m^3, carrier deficit={:.3e} m^3.",
                     entry.comp.name,
                     _phase_name(phase),
                     available,
+                    _phase_name(preferred_phase),
+                    preferred_available,
+                    _phase_name(fallback_phase),
+                    fallback_available,
                     dV,
                     deficit,
                 )

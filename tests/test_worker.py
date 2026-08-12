@@ -162,6 +162,49 @@ def _make_bpr_platform(setpoint_bar: float = 1.2):
     return graph, components
 
 
+def _make_mfc_platform(src_bar: float = 5.0, snk_bar: float = 1.0):
+    """src (src_bar) -- MFC -- snk (snk_bar). No tube in between other than
+    the MFC's own port wiring, so once the MFC's resistance is calibrated to
+    its setpoint, the solved flow through it should sit close to that
+    setpoint regardless of the (fixed) src/snk pressure differential.
+    """
+    src = PressureControlData.from_mode(
+        PressureControlMode(name="src", setpoint=ChemUnitQuantity(f"{src_bar} bar"))
+    )
+    mfc_defn = COMPONENTS["MFCComponent"]
+    mfc = mfc_defn.data_class.from_mode(mfc_defn.mode_class(name="mfc"))
+    snk = PressureControlData.from_mode(
+        PressureControlMode(name="snk", setpoint=ChemUnitQuantity(f"{snk_bar} bar"))
+    )
+    e_in = EdgeData.from_mode(
+        EdgeMode(
+            name="ein",
+            origin="src",
+            origin_port=1,
+            destination="mfc",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=ChemUnitQuantity("5 cm"),
+            diameter=ChemUnitQuantity("4 mm"),
+        )
+    )
+    e_out = EdgeData.from_mode(
+        EdgeMode(
+            name="eout",
+            origin="mfc",
+            origin_port=2,
+            destination="snk",
+            destination_port=1,
+            classification=ConnectionType.HYDRAULIC,
+            length=ChemUnitQuantity("5 cm"),
+            diameter=ChemUnitQuantity("4 mm"),
+        )
+    )
+    components = [src, mfc, snk]
+    graph = compile_graph(components, [e_in, e_out])
+    return graph, components, mfc
+
+
 def _make_pump_platform(src_bar: float = 1.0, snk_bar: float = 5.0):
     """src (src_bar) -> HPLCPump -> snk (snk_bar).
 
@@ -532,6 +575,43 @@ def test_pump_stop_closes_edge_and_stops_flow():
 
     assert w.hyd_state is not None
     assert w.hyd_state.flows["hplcpump.1.2"] == pytest.approx(0.0, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# 9. MFC transient-resistance seeding (mid-run set-flow-rate regression)
+# ---------------------------------------------------------------------------
+
+
+def test_mfc_does_not_overshoot_setpoint_on_first_tick_after_midrun_command():
+    """Regression test: an MFC commanded mid-run, after the sim already has a
+    real prior pressure differential across it, must not transiently act as
+    a near-short-circuit on the very first solved tick after
+    `set-flow-rate`. Without seeding the edge's resistance from the last
+    known pressures before that tick's solve, an open-but-uncalibrated
+    JUNCTION edge falls back to R_JUNCTION (far below normal tube
+    resistance), so with a real ~4 bar differential already present the
+    solved flow would be orders of magnitude above the 5 ml/min setpoint.
+    """
+    graph, components, mfc = _make_mfc_platform(src_bar=5.0, snk_bar=1.0)
+    cfg = SimConfig(dt=0.1, t_end=1.0)
+    w = Worker(graph, components, cfg)
+
+    # Let the still-closed MFC settle for a few ticks so a genuine ~4 bar dp
+    # exists across it in the worker's last completed hyd_state.
+    for _ in range(5):
+        w.step()
+    assert graph.edges["mfc.1.2"].resistance_override == pytest.approx(R_MAX_HYDRAULIC)
+
+    mfc.apply("set-flow-rate", flowrate="5 ml/min")
+    resync_component(graph, mfc)
+    # Opens immediately on command -- this contract must not change.
+    assert graph.edges["mfc.1.2"].resistance_override is None
+
+    w.step()
+
+    expected_flow_si = float(ChemUnitQuantity("5 ml/min").to_base_units().magnitude)
+    actual_flow_si = w.hyd_state.flows["mfc.1.2"]
+    assert actual_flow_si == pytest.approx(expected_flow_si, rel=0.1)
 
 
 def test_worker_heat_connection_uses_live_controller_temperature():

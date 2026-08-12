@@ -22,6 +22,15 @@ R_JUNCTION: float = 1e3
 # Default dynamic viscosity for water at 25 °C.  Unit: Pa·s.
 ETA_WATER_25C: float = 8.9e-4
 
+# Magnitude threshold (Pa, relative to atmospheric) beyond which a solved
+# node pressure is considered physically implausible for a real hydraulic
+# network and is surfaced as a WARNING (not raised - see hydraulics.solver
+# module docstring). Sized generously above realistic lab operating
+# pressures - BPR/back-pressure setpoints and gas supplies in example
+# platforms top out around 1-3 bar - while still catching genuine
+# numerical blow-ups. Unit: Pa.
+PRESSURE_SANITY_THRESHOLD_PA: float = 1.0e7  # ~100 bar
+
 # ---------------------------------------------------------------------------
 # Transport module constants
 # ---------------------------------------------------------------------------

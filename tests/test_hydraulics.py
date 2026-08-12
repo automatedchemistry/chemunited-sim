@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 from chemunited_core.common.constant import ATMOSPHERE_PRESSURE_PA
 from chemunited_core.components.enums import BoundaryConditionKind, InternalEdgeRole
 from chemunited_core.components.internals import PortBoundaryCondition
 
 from chemunited_sim.adapter.models import HydraulicEdge, HydraulicGraph, HydraulicNode
+from chemunited_sim.common.constant import PRESSURE_SANITY_THRESHOLD_PA
 from chemunited_sim.hydraulics import solve
 
 
@@ -153,3 +156,46 @@ def test_forced_flow_edge_decouples_pressure_of_unconnected_sides():
     assert state.pressures["a.1"] == pytest.approx(float(ATMOSPHERE_PRESSURE_PA))
     assert state.pressures["a.2"] == pytest.approx(float(ATMOSPHERE_PRESSURE_PA))
     assert state.flows["pump.1.2"] == pytest.approx(target_flow)
+
+
+def test_two_flow_bcs_sharing_a_vented_junction_stay_pressure_bounded():
+    """Regression test for the syringe-nozzle + missing-Dirichlet pressure
+    blow-up: two simultaneous FLOW (Neumann) boundary conditions -- e.g. two
+    active syringe pumps -- feed a shared junction whose only path to ground
+    is a real resistive edge a couple of hops away to a properly-vented,
+    Dirichlet-anchored (PRESSURE BC) sink -- the "config fixed" scenario.
+    Even with both sources' own JUNCTION edges still uncalibrated
+    (resistance_override=None, falling back to the small R_JUNCTION constant
+    -- the "unseeded nozzle" state), a real Dirichlet reference within the
+    same connected component must keep solved pressures physically bounded.
+    """
+    graph = HydraulicGraph()
+    graph.nodes["pumpA"] = _node(
+        "pumpA", PortBoundaryCondition(BoundaryConditionKind.FLOW, 5.0e-9)
+    )
+    graph.nodes["pumpB"] = _node(
+        "pumpB", PortBoundaryCondition(BoundaryConditionKind.FLOW, 5.0e-9)
+    )
+    graph.nodes["mix"] = _node("mix", is_hub=True)
+    graph.nodes["sink"] = _node(
+        "sink",
+        PortBoundaryCondition(BoundaryConditionKind.PRESSURE, ATMOSPHERE_PRESSURE_PA),
+    )
+
+    # Uncalibrated nozzle edges (mirrors an unseeded, freshly-opened
+    # FlowSource nozzle: resistance_override=None, JUNCTION role).
+    graph.edges["pumpA_to_mix"] = _edge(
+        "pumpA_to_mix", "pumpA", "mix", role=InternalEdgeRole.JUNCTION
+    )
+    graph.edges["pumpB_to_mix"] = _edge(
+        "pumpB_to_mix", "pumpB", "mix", role=InternalEdgeRole.JUNCTION
+    )
+    # Real resistive path to a properly-vented Dirichlet reference.
+    graph.edges["mix_to_sink"] = _edge("mix_to_sink", "mix", "sink")
+
+    state = solve(graph)
+
+    for node_id in ("pumpA", "pumpB", "mix", "sink"):
+        p = state.pressures[node_id]
+        assert math.isfinite(p)
+        assert abs(p - float(ATMOSPHERE_PRESSURE_PA)) < PRESSURE_SANITY_THRESHOLD_PA
