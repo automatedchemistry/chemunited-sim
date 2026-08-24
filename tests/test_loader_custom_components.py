@@ -20,7 +20,7 @@ def _write_protocols(project_dir: Path) -> None:
 
 
 def _write_custom_component(project_dir: Path) -> None:
-    components_dir = project_dir / "components"
+    components_dir = project_dir / "customizations" / "components"
     components_dir.mkdir(parents=True, exist_ok=True)
     (components_dir / "__init__.py").write_text(
         "from . import my_valve\n", encoding="utf-8"
